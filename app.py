@@ -12,9 +12,9 @@ st.set_page_config(
 )
 
 st.title("⚾ MLB Home Run Betting Dashboard")
-st.caption(f"Data pulled live from MLB Stats API · Updated {datetime.now().strftime('%b %d, %Y %I:%M %p')}")
+st.caption(f"Live data from MLB Stats API · Refreshed {datetime.now().strftime('%b %d, %Y %I:%M %p')}")
 
-# ── Park factors (2024/2025 estimates — update yearly) ─────────────────────────
+# ── Park factors ───────────────────────────────────────────────────────────────
 PARK_FACTORS = {
     "Cincinnati Reds": 1.18, "Colorado Rockies": 1.15, "Philadelphia Phillies": 1.12,
     "Atlanta Braves": 1.10, "Texas Rangers": 1.09, "Chicago Cubs": 1.08,
@@ -28,13 +28,13 @@ PARK_FACTORS = {
     "San Francisco Giants": 0.92, "Miami Marlins": 0.91, "Oakland Athletics": 0.90,
 }
 
-# ── Fetch data from MLB Stats API ──────────────────────────────────────────────
-@st.cache_data(ttl=3600)  # cache for 1 hour
-def fetch_hr_leaders(season: int, min_pa: int) -> pd.DataFrame:
+# ── Fetch data ─────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_stats(season: int, min_pa: int) -> pd.DataFrame:
     url = (
         f"https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=hitting&gameType=R"
-        f"&season={season}&limit=200&sortStat=homeRuns"
+        f"&season={season}&limit=300&sortStat=homeRuns"
     )
     try:
         resp = requests.get(url, timeout=10)
@@ -46,39 +46,70 @@ def fetch_hr_leaders(season: int, min_pa: int) -> pd.DataFrame:
 
     rows = []
     for s in splits:
-        stat = s.get("stat", {})
+        stat   = s.get("stat", {})
         player = s.get("player", {})
-        team = s.get("team", {})
-        pa = int(stat.get("plateAppearances", 0) or 0)
-        hr = int(stat.get("homeRuns", 0) or 0)
-        ab = int(stat.get("atBats", 1) or 1)
-        hits = int(stat.get("hits", 0) or 0)
-        slg_raw = stat.get("sluggingPercentage")
-        avg_raw = stat.get("avg")
+        team   = s.get("team", {})
 
+        pa = int(stat.get("plateAppearances", 0) or 0)
         if pa < min_pa:
             continue
 
-        try:
-            slg = float(slg_raw) if slg_raw not in (None, ".---") else 0.0
-            avg = float(avg_raw) if avg_raw not in (None, ".---") else 0.0
-        except (ValueError, TypeError):
-            slg, avg = 0.0, 0.0
+        hr      = int(stat.get("homeRuns", 0) or 0)
+        ab      = int(stat.get("atBats", 1) or 1)
+        rbi     = int(stat.get("rbi", 0) or 0)
+        bb      = int(stat.get("baseOnBalls", 0) or 0)
+        so      = int(stat.get("strikeOuts", 0) or 0)
+        sb      = int(stat.get("stolenBases", 0) or 0)
+        runs    = int(stat.get("runs", 0) or 0)
+        doubles = int(stat.get("doubles", 0) or 0)
+        triples = int(stat.get("triples", 0) or 0)
 
+        def safe_float(key):
+            v = stat.get(key)
+            try:
+                return float(v) if v not in (None, ".---", "-.--") else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        avg = safe_float("avg")
+        slg = safe_float("sluggingPercentage")
+        obp = safe_float("obp")
+        ops = safe_float("ops")
         iso = round(slg - avg, 3)
-        hr_per_pa = round(hr / pa, 4) if pa > 0 else 0.0
+
+        hr_per_pa  = round(hr / pa, 4) if pa > 0 else 0.0
+        ab_per_hr  = round(ab / hr, 1) if hr > 0 else 0.0
+        k_pct      = round(so / pa * 100, 1) if pa > 0 else 0.0
+        bb_pct     = round(bb / pa * 100, 1) if pa > 0 else 0.0
+
         team_name = team.get("name", "Unknown")
-        pf = PARK_FACTORS.get(team_name, 1.00)
+        pf        = PARK_FACTORS.get(team_name, 1.00)
+        hr_score  = round(hr_per_pa * iso * pf * 10000, 1) if iso > 0 else 0.0
 
         rows.append({
-            "Player": player.get("fullName", "Unknown"),
-            "Team": team_name,
-            "PA": pa,
-            "HR": hr,
-            "HR/PA": hr_per_pa,
-            "ISO": iso,
+            "Player":      player.get("fullName", "Unknown"),
+            "Team":        team_name,
+            "PA":          pa,
+            "AB":          ab,
+            "HR":          hr,
+            "HR/PA":       hr_per_pa,
+            "AB/HR":       ab_per_hr,
+            "AVG":         avg,
+            "OBP":         obp,
+            "SLG":         slg,
+            "OPS":         ops,
+            "ISO":         iso,
+            "RBI":         rbi,
+            "Runs":        runs,
+            "2B":          doubles,
+            "3B":          triples,
+            "BB":          bb,
+            "BB%":         bb_pct,
+            "K":           so,
+            "K%":          k_pct,
+            "SB":          sb,
             "Park Factor": pf,
-            "HR Score": round(hr_per_pa * iso * pf * 10000, 1),
+            "HR Score":    hr_score,
         })
 
     df = pd.DataFrame(rows)
@@ -88,94 +119,135 @@ def fetch_hr_leaders(season: int, min_pa: int) -> pd.DataFrame:
     return df
 
 
-# ── Sidebar controls ───────────────────────────────────────────────────────────
+# ── Column groups for the sidebar ──────────────────────────────────────────────
+COL_GROUPS = {
+    "Home run stats":   ["HR", "HR/PA", "AB/HR", "HR Score"],
+    "Power stats":      ["ISO", "SLG", "OPS"],
+    "On-base stats":    ["AVG", "OBP", "BB", "BB%"],
+    "Plate discipline": ["K", "K%", "PA", "AB"],
+    "Run production":   ["RBI", "Runs", "2B", "3B", "SB"],
+    "Ballpark":         ["Park Factor"],
+}
+
+DEFAULTS = {"HR", "HR/PA", "ISO", "HR Score", "Park Factor", "AVG", "OPS"}
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Filters")
     season = st.selectbox("Season", [2026, 2025, 2024], index=0)
-    min_pa = st.slider("Minimum plate appearances", 50, 300, 100, step=10)
+    min_pa = st.slider("Min plate appearances", 50, 300, 100, step=10)
+
+    st.markdown("---")
+    st.header("Columns to show")
+    st.caption("Tick the stats you want in the table.")
+
+    selected_cols = ["Player", "Team"]
+    for group, cols in COL_GROUPS.items():
+        st.markdown(f"**{group}**")
+        for col in cols:
+            if st.checkbox(col, value=(col in DEFAULTS), key=f"col_{col}"):
+                selected_cols.append(col)
+
+    st.markdown("---")
+    st.markdown("**Sort table by**")
+    sort_options = [c for c in selected_cols if c not in ("Player", "Team")]
+    sort_by  = st.selectbox("", sort_options if sort_options else ["HR Score"],
+                            label_visibility="collapsed")
+    sort_asc = st.checkbox("Sort ascending", value=False)
+
     st.markdown("---")
     st.markdown("**HR Score formula**")
     st.caption("HR/PA × ISO × Park Factor × 10,000")
-    st.caption("Higher = better HR prop candidate today.")
-    st.markdown("---")
-    st.markdown("**Park factor guide**")
-    st.caption("> 1.05 = hitter friendly")
-    st.caption("1.00 = neutral")
-    st.caption("< 0.95 = pitcher friendly")
+    st.caption("Higher = stronger HR prop candidate.")
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 with st.spinner("Pulling live MLB data..."):
-    df = fetch_hr_leaders(season, min_pa)
+    df = fetch_stats(season, min_pa)
 
 if df.empty:
-    st.warning("No data returned. Try a different season or check your connection.")
+    st.warning("No data returned. Try adjusting filters or check your connection.")
     st.stop()
 
-# ── Top metric cards ───────────────────────────────────────────────────────────
-top = df.iloc[0]
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Players loaded", len(df))
-col2.metric("Top HR leader", f"{top['Player']}", f"{top['HR']} HR")
-col3.metric("Best HR/PA", f"{top['Player']}", f"{top['HR/PA']:.4f}")
-col4.metric("Top HR score today", top['Player'], f"{top['HR Score']}")
+# ── Player search ──────────────────────────────────────────────────────────────
+search = st.text_input("Search for a player", placeholder="e.g. Aaron Judge")
+if search:
+    df = df[df["Player"].str.contains(search, case=False, na=False)]
+
+# ── Sort ───────────────────────────────────────────────────────────────────────
+if sort_by in df.columns:
+    df = df.sort_values(sort_by, ascending=sort_asc).reset_index(drop=True)
+    df.index += 1
+
+# ── Metric cards ───────────────────────────────────────────────────────────────
+top = df.iloc[0] if not df.empty else None
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Players shown", len(df))
+if top is not None:
+    c2.metric("HR leader",    top["Player"], f"{int(top['HR'])} HR")
+    c3.metric("Best HR/PA",   top["Player"], f"{top['HR/PA']:.4f}")
+    c4.metric("Top HR score", top["Player"], f"{top['HR Score']}")
 
 st.markdown("---")
 
 # ── Main table ─────────────────────────────────────────────────────────────────
 st.subheader("Player rankings")
-st.caption("Sorted by HR Score — your best prop candidates at the top.")
 
-show_cols = ["Player", "Team", "PA", "HR", "HR/PA", "ISO", "Park Factor", "HR Score"]
+valid_cols = [c for c in selected_cols if c in df.columns]
 
-st.dataframe(
-    df[show_cols].style
-        .background_gradient(subset=["HR Score"], cmap="YlOrRd")
-        .background_gradient(subset=["HR/PA"], cmap="Greens")
-        .background_gradient(subset=["Park Factor"], cmap="Blues")
-        .format({"HR/PA": "{:.4f}", "ISO": "{:.3f}", "Park Factor": "{:.2f}"}),
-    use_container_width=True,
-    height=480,
-)
+format_map = {
+    "HR/PA": "{:.4f}", "AVG": "{:.3f}", "OBP": "{:.3f}",
+    "SLG": "{:.3f}",  "OPS": "{:.3f}", "ISO": "{:.3f}",
+    "Park Factor": "{:.2f}", "BB%": "{:.1f}%", "K%": "{:.1f}%",
+}
+fmt = {k: v for k, v in format_map.items() if k in valid_cols}
+
+styled = df[valid_cols].style.format(fmt)
+if "HR Score"    in valid_cols: styled = styled.background_gradient(subset=["HR Score"],    cmap="YlOrRd")
+if "HR/PA"       in valid_cols: styled = styled.background_gradient(subset=["HR/PA"],       cmap="Greens")
+if "ISO"         in valid_cols: styled = styled.background_gradient(subset=["ISO"],         cmap="Purples")
+if "Park Factor" in valid_cols: styled = styled.background_gradient(subset=["Park Factor"], cmap="Blues")
+if "OPS"         in valid_cols: styled = styled.background_gradient(subset=["OPS"],         cmap="Oranges")
+
+st.dataframe(styled, use_container_width=True, height=500)
 
 st.markdown("---")
 
 # ── Charts ─────────────────────────────────────────────────────────────────────
+st.subheader("Charts")
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.subheader("HR/PA vs ISO — top 40")
+    st.markdown("**HR/PA vs ISO — top 40**")
     top40 = df.head(40)
-    fig = px.scatter(
-        top40, x="ISO", y="HR/PA", text="Player",
-        color="Park Factor", color_continuous_scale="RdYlGn",
-        size="HR", hover_data=["Team", "HR", "HR Score"],
-        title="",
-    )
-    fig.update_traces(textposition="top center", textfont_size=9)
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380)
-    st.plotly_chart(fig, use_container_width=True)
+    if {"HR/PA", "ISO", "HR"}.issubset(top40.columns):
+        fig = px.scatter(
+            top40, x="ISO", y="HR/PA", text="Player",
+            color="Park Factor", color_continuous_scale="RdYlGn",
+            size="HR", hover_data=["Team", "HR", "HR Score"],
+        )
+        fig.update_traces(textposition="top center", textfont_size=9)
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=380)
+        st.plotly_chart(fig, use_container_width=True)
 
 with col_b:
-    st.subheader("Top 15 by HR Score")
+    st.markdown("**Top 15 by HR Score**")
     top15 = df.head(15).sort_values("HR Score")
-    fig2 = px.bar(
-        top15, x="HR Score", y="Player", orientation="h",
-        color="HR Score", color_continuous_scale="YlOrRd",
-        hover_data=["HR", "HR/PA", "ISO", "Park Factor"],
-        title="",
-    )
-    fig2.update_layout(
-        margin=dict(l=0, r=0, t=10, b=0),
-        height=380,
-        yaxis_title="",
-        coloraxis_showscale=False,
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+    if "HR Score" in top15.columns:
+        fig2 = px.bar(
+            top15, x="HR Score", y="Player", orientation="h",
+            color="HR Score", color_continuous_scale="YlOrRd",
+            hover_data=["HR", "HR/PA", "ISO", "Park Factor"],
+        )
+        fig2.update_layout(
+            margin=dict(l=0, r=0, t=10, b=0), height=380,
+            yaxis_title="", coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
     "Data: MLB Stats API (statsapi.mlb.com) · "
-    "Park factors are estimates based on multi-year averages · "
-    "This is for informational purposes — bet responsibly."
+    "Park factors are multi-year estimates · "
+    "For informational purposes — bet responsibly."
 )
