@@ -179,7 +179,3 @@ st.caption(
     "Park factors are estimates based on multi-year averages · "
     "This is for informational purposes — bet responsibly."
 )
-streamlit
-requests
-pandas
-plotly
