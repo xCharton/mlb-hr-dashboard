@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, date
+import io
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -75,7 +76,7 @@ def fetch_schedule(game_date: str):
             })
     return games
 
-# ── Fetch hitting stats ────────────────────────────────────────────────────────
+# ── Fetch hitting stats from MLB API ──────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_hitting_stats(season: int) -> pd.DataFrame:
     url = (
@@ -101,7 +102,6 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
             continue
 
         hr = int(stat.get("homeRuns", 0) or 0)
-        ab = int(stat.get("atBats", 1) or 1)
 
         def sf(key):
             v = stat.get(key)
@@ -121,11 +121,49 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
             "Team":      team.get("name", "Unknown"),
             "PA":        pa,
             "HR":        hr,
-            "HR/PA":     round(hr / pa, 4) if pa > 0 else 0.0,
             "ISO":       iso,
             "SLG":       slg,
         })
     return pd.DataFrame(rows)
+
+# ── Fetch HH% from Baseball Savant ────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_hard_hit(season: int) -> pd.DataFrame:
+    # Baseball Savant Statcast leaderboard CSV — hard hit rate (hard_hit_percent)
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&id=hard_hit_percent&sportId=1"
+        f"&season={season}&season_end={season}"
+        f"&min=50&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    # Savant returns last_name, first_name separately
+    if "last_name" in df.columns and "first_name" in df.columns:
+        df["Player"] = df["first_name"].str.strip() + " " + df["last_name"].str.strip()
+    elif "player_name" in df.columns:
+        # Sometimes returned as "Last, First"
+        df["Player"] = df["player_name"].apply(
+            lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+        )
+    else:
+        return pd.DataFrame()
+
+    # Find the hard hit % column — Savant sometimes varies the name
+    hh_col = next(
+        (c for c in df.columns if "hard_hit" in c.lower() and "percent" in c.lower()),
+        next((c for c in df.columns if "hard_hit" in c.lower()), None)
+    )
+    if hh_col is None:
+        return pd.DataFrame()
+
+    df["HH%"] = pd.to_numeric(df[hh_col], errors="coerce")
+    return df[["Player", "HH%"]].dropna()
 
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
@@ -139,7 +177,7 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         splits = r.json()["stats"][0]["splits"]
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
     rows = []
@@ -154,11 +192,9 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
             continue
 
         hr_allowed = int(stat.get("homeRuns", 0) or 0)
-        hr9 = round(hr_allowed / ip * 9, 2) if ip > 0 else 0.0
-
         rows.append({
-            "Pitcher":  player.get("fullName", "Unknown"),
-            "HR/9":     hr9,
+            "Pitcher": player.get("fullName", "Unknown"),
+            "HR/9":    round(hr_allowed / ip * 9, 2) if ip > 0 else 0.0,
         })
     return pd.DataFrame(rows)
 
@@ -178,22 +214,22 @@ def build_matchup_df(game, hitting_df, pitcher_df, min_pa, min_hr):
         if batters.empty:
             continue
 
-        park_factor = PARK_FACTORS.get(game["home_team"], 1.00)
-
-        pr = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher_name]
+        park_factor  = PARK_FACTORS.get(game["home_team"], 1.00)
+        pr           = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher_name]
         opp_hr9      = pr.iloc[0]["HR/9"] if not pr.empty else None
         pitcher_mult = 1.0 + (opp_hr9 - 1.2) * 0.15 if opp_hr9 is not None else 1.0
 
         for _, b in batters.iterrows():
             score = round(
-                b["HR/PA"] * max(b["ISO"], 0.001) * park_factor * pitcher_mult * 10000, 1
+                b["ISO"] * max(b.get("HH%", 40) / 100, 0.01)
+                * park_factor * pitcher_mult * 10000, 1
             )
             rows.append({
                 "Player":        b["Player"],
                 "Batting team":  batting_team,
                 "Opp pitcher":   opp_pitcher_name,
                 "HR":            b["HR"],
-                "HR/PA":         b["HR/PA"],
+                "HH%":           b.get("HH%", None),
                 "ISO":           b["ISO"],
                 "SLG":           b["SLG"],
                 "Park factor":   park_factor,
@@ -218,7 +254,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Matchup score**")
-    st.caption("HR/PA × ISO × Park factor × Pitcher multiplier × 10,000")
+    st.caption("ISO × HH% × Park factor × Pitcher multiplier × 10,000")
     st.caption("Higher = stronger HR prop candidate today.")
 
 # ── Load data ──────────────────────────────────────────────────────────────────
@@ -228,9 +264,10 @@ st.caption(
     f"Stats refresh every hour · Schedule refreshes every 30 min"
 )
 
-with st.spinner("Loading schedule and stats..."):
+with st.spinner("Loading schedule, stats, and Statcast data..."):
     games      = fetch_schedule(date_str)
     hitting_df = fetch_hitting_stats(season)
+    hard_hit   = fetch_hard_hit(season)
     pitcher_df = fetch_pitcher_stats(season)
 
 if not games:
@@ -240,6 +277,20 @@ if not games:
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
+
+# ── Merge HH% into hitting data ───────────────────────────────────────────────
+if not hard_hit.empty:
+    hitting_df = hitting_df.merge(hard_hit, on="Player", how="left")
+    hh_loaded  = True
+else:
+    hitting_df["HH%"] = None
+    hh_loaded  = False
+
+if not hh_loaded:
+    st.warning(
+        "⚠️ Could not load Hard Hit % from Baseball Savant today — "
+        "matchup scores will use ISO and SLG only. All other data is current."
+    )
 
 # ── Game cards ─────────────────────────────────────────────────────────────────
 st.subheader("Today's games")
@@ -293,7 +344,7 @@ c3.metric("Facing", top["Opp pitcher"],
           f"HR/9: {top['Pitcher HR/9']:.2f}" if top["Pitcher HR/9"] is not None else "HR/9: TBD")
 c4.metric("Park factor", top["Batting team"], f"PF {top['Park factor']:.2f}")
 
-# ── Player search ──────────────────────────────────────────────────────────────
+# ── Search ─────────────────────────────────────────────────────────────────────
 search  = st.text_input("Search player or pitcher", placeholder="e.g. Judge, Cole")
 view_df = matchup_df.copy()
 if search:
@@ -303,29 +354,30 @@ if search:
     )
     view_df = view_df[mask]
 
-# ── Table — your exact columns, always on ─────────────────────────────────────
-# Columns: Player, Batting team, Opp pitcher, HR, HR/PA, ISO, SLG, Park factor, Pitcher HR/9, Matchup score
+# ── Table ──────────────────────────────────────────────────────────────────────
+# Columns: Player, Batting team, Opp pitcher, HR, HH%, ISO, SLG, Park factor, Pitcher HR/9, Matchup score
 display_cols = [
     "Player", "Batting team", "Opp pitcher",
-    "HR", "HR/PA", "ISO", "SLG",
+    "HR", "HH%", "ISO", "SLG",
     "Park factor", "Pitcher HR/9",
     "Matchup score",
 ]
 display_cols = [c for c in display_cols if c in view_df.columns]
 
 fmt = {
-    "HR/PA":        "{:.4f}",
+    "HH%":          "{:.1f}%",
     "ISO":          "{:.3f}",
     "SLG":          "{:.3f}",
     "Park factor":  "{:.2f}",
     "Pitcher HR/9": "{:.2f}",
 }
 
-styled = view_df[display_cols].style.format(fmt, na_rep="TBD")
+styled = view_df[display_cols].style.format(fmt, na_rep="—")
 styled = styled.background_gradient(subset=["Matchup score"], cmap="YlOrRd")
-styled = styled.background_gradient(subset=["HR/PA"],         cmap="Greens")
-styled = styled.background_gradient(subset=["ISO"],           cmap="Purples")
-styled = styled.background_gradient(subset=["SLG"],           cmap="Blues")
+if view_df["HH%"].notna().any():
+    styled = styled.background_gradient(subset=["HH%"], cmap="Greens")
+styled = styled.background_gradient(subset=["ISO"],  cmap="Purples")
+styled = styled.background_gradient(subset=["SLG"],  cmap="Blues")
 if view_df["Pitcher HR/9"].notna().any():
     styled = styled.background_gradient(subset=["Pitcher HR/9"], cmap="Reds")
 
@@ -343,7 +395,7 @@ with col_a:
     fig = px.bar(
         top15, x="Matchup score", y="Player", orientation="h",
         color="Matchup score", color_continuous_scale="YlOrRd",
-        hover_data=["Batting team", "Opp pitcher", "HR", "HR/PA"],
+        hover_data=["Batting team", "Opp pitcher", "HR", "HH%"],
         text="Opp pitcher",
     )
     fig.update_traces(textposition="inside", textfont_size=9)
@@ -354,20 +406,24 @@ with col_a:
     st.plotly_chart(fig, use_container_width=True)
 
 with col_b:
-    st.markdown("**ISO vs SLG — today's batters**")
+    st.markdown("**HH% vs ISO — today's batters**")
     plot_df = matchup_df.head(60)
-    fig2 = px.scatter(
-        plot_df, x="ISO", y="SLG", text="Player",
-        color="Matchup score", color_continuous_scale="YlOrRd",
-        size="HR", hover_data=["Batting team", "Opp pitcher", "Matchup score", "HR/PA"],
-    )
-    fig2.update_traces(textposition="top center", textfont_size=9)
-    fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=420)
-    st.plotly_chart(fig2, use_container_width=True)
+    if plot_df["HH%"].notna().any():
+        fig2 = px.scatter(
+            plot_df, x="HH%", y="ISO", text="Player",
+            color="Matchup score", color_continuous_scale="YlOrRd",
+            size="HR", hover_data=["Batting team", "Opp pitcher", "Matchup score", "SLG"],
+        )
+        fig2.update_traces(textposition="top center", textfont_size=9)
+        fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=420)
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("HH% data unavailable from Savant today — chart will appear once data loads.")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
-    "Data: MLB Stats API · Park factors are multi-year estimates · "
+    "Data: MLB Stats API + Baseball Savant Statcast · "
+    "Park factors are multi-year estimates · "
     "Probable pitchers from MLB schedule API · Bet responsibly."
 )
