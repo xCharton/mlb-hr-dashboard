@@ -389,7 +389,14 @@ with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
     sc_swing       = fetch_statcast_swing(season)
     sc_barrels     = fetch_statcast_barrels(season)
     pitcher_df     = fetch_pitcher_stats(season)
-
+    
+if st.checkbox("Show debug info"):
+    st.write("Statcast main columns:", list(sc_main.columns) if not sc_main.empty else "EMPTY")
+    st.write("Swing columns:", list(sc_swing.columns) if not sc_swing.empty else "EMPTY")
+    st.write("Barrel columns:", list(sc_barrels.columns) if not sc_barrels.empty else "EMPTY")
+    st.write("Hitting df columns:", list(hitting_df.columns))
+    st.write("HH% sample:", hitting_df["HH%"].dropna().head(3).tolist() if "HH%" in hitting_df.columns else "MISSING")
+    
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
     st.stop()
