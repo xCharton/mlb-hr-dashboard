@@ -366,6 +366,12 @@ with st.sidebar:
     st.markdown("🔴 Red = bad")
     st.caption("SwStr% is reversed — green means low whiff rate (good contact).")
     st.markdown("---")
+    if st.checkbox("Show debug info"):
+        st.write("Statcast main columns:", list(sc_main.columns) if not sc_main.empty else "EMPTY")
+        st.write("Swing columns:", list(sc_swing.columns) if not sc_swing.empty else "EMPTY")
+        st.write("Barrel columns:", list(sc_barrels.columns) if not sc_barrels.empty else "EMPTY")
+        st.write("Hitting df columns:", list(hitting_df.columns))
+        st.write("HH% sample:", hitting_df["HH%"].dropna().head(3).tolist() if "HH%" in hitting_df.columns else "MISSING")
     st.markdown("**Matchup score**")
     st.caption("ISO × HH% × Brl/BIP% × Park factor × Pitcher multiplier")
 
