@@ -165,7 +165,7 @@ def fetch_last_n_games(team_id: int, season: int, n_games: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-# ── Savant: main leaderboard — HH%, Avg EV, Avg LA, FB%, SweetSpot% ──────────
+# ── Savant: main leaderboard — HH%, Avg EV, Avg LA, SweetSpot% ───────────────
 @st.cache_data(ttl=3600)
 def fetch_savant_main(season: int) -> pd.DataFrame:
     url = (
@@ -189,13 +189,51 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_angle":         "Avg LA",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-        "fbld":                  "FB%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["Player"])
+
+# ── Savant: batted ball leaderboard — FB% (fly balls only, ~30-45%) ───────────
+@st.cache_data(ttl=3600)
+def fetch_savant_fb(season: int) -> pd.DataFrame:
+    """
+    Savant batted ball leaderboard — n_fb_percent is pure fly ball rate.
+    Typical range: 25-45%. Much more accurate than fbld which includes line drives.
+    """
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&id=n_fb_percent&sportId=1"
+        f"&season={season}&season_end={season}&min=50&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    df = add_player_col(df)
+    if "Player" not in df.columns:
+        return pd.DataFrame()
+
+    # Find the fly ball percent column
+    fb_col = next(
+        (c for c in df.columns if c.lower() in ("n_fb_percent", "fb_percent", "fly_ball_percent")),
+        next((c for c in df.columns if "fb" in c.lower() and "percent" in c.lower()), None)
+    )
+    if not fb_col:
+        return pd.DataFrame()
+
+    df = df.rename(columns={fb_col: "FB%"})
+    df = df[["Player", "FB%"]].copy()
+    df["FB%"] = pd.to_numeric(df["FB%"], errors="coerce")
+    # Convert to percent if returned as decimal
+    if df["FB%"].dropna().max() < 1.0:
+        df["FB%"] = df["FB%"] * 100
     return df.dropna(subset=["Player"])
 
 # ── Savant: barrel leaderboard — Brl/BIP% ─────────────────────────────────────
@@ -399,6 +437,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     games      = fetch_schedule(date_str)
     sc_main    = fetch_savant_main(season)
     sc_barrels = fetch_savant_barrels(season)
+    sc_fb      = fetch_savant_fb(season)
     pitcher_df = fetch_pitcher_stats(season)
 
 if not games:
@@ -413,7 +452,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge Statcast (always full-season — Savant doesn't do recent splits) ─────
-for src in [sc_main, sc_barrels]:
+for src in [sc_main, sc_barrels, sc_fb]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
 
@@ -423,8 +462,9 @@ for col in STATCAST_COLS:
 
 # Status banner
 failed = []
-if sc_main.empty:    failed.append("EV / HH% / LA / FB% / SweetSpot%")
+if sc_main.empty:    failed.append("EV / HH% / LA / SweetSpot%")
 if sc_barrels.empty: failed.append("Brl/BIP%")
+if sc_fb.empty:      failed.append("FB%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
 
