@@ -30,18 +30,14 @@ PARK_FACTORS = {
 
 # ── Savant name parser ─────────────────────────────────────────────────────────
 def parse_savant_name(val: str) -> str:
-    """'Doe, John' → 'John Doe'"""
     if "," in str(val):
         parts = [p.strip() for p in str(val).split(",")]
         if len(parts) == 2:
             return f"{parts[1]} {parts[0]}"
     return str(val).strip()
 
-def get_name_col(df: pd.DataFrame):
-    return next((c for c in df.columns if "last_name" in c.lower()), None)
-
 def add_player_col(df: pd.DataFrame) -> pd.DataFrame:
-    name_col = get_name_col(df)
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
     if name_col:
         df["Player"] = df[name_col].apply(parse_savant_name)
     return df
@@ -117,16 +113,14 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
             except (ValueError, TypeError):
                 return 0.0
 
-        avg = sf("avg")
         slg = sf("sluggingPercentage")
-        iso = max(round(slg - avg, 3), 0.0)
 
         rows.append({
             "player_id": player.get("id"),
             "Player":    player.get("fullName", "Unknown"),
             "team_id":   team.get("id"),
             "Team":      team.get("name", "Unknown"),
-            "PA": pa, "HR": hr, "ISO": iso,
+            "PA": pa, "HR": hr, "SLG": slg,
         })
     return pd.DataFrame(rows)
 
@@ -163,7 +157,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["Player"])
 
-# ── Savant: barrel leaderboard — Brl/BIP% and PulledBrl% ─────────────────────
+# ── Savant: barrel leaderboard — Brl/BIP% ────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_savant_barrels(season: int) -> pd.DataFrame:
     url = (
@@ -182,72 +176,18 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     if "Player" not in df.columns:
         return pd.DataFrame()
 
-    # Find Brl/BIP% — could be brl_percent, brl_pa, barrel_batted_rate
     brl_col = next(
         (c for c in df.columns
          if c.lower() in ("brl_percent", "brl_pa", "barrel_batted_rate")),
         None
     )
-    # Find PulledBrl% — Savant calls it pulled_brl_percent or similar
-    pull_col = next(
-        (c for c in df.columns
-         if "pull" in c.lower() and "brl" in c.lower()),
-        None
-    )
-
-    rename = {}
-    if brl_col:  rename[brl_col]  = "Brl/BIP%"
-    if pull_col: rename[pull_col] = "PulledBrl%"
-
-    df   = df.rename(columns=rename)
-    keep = ["Player"] + [c for c in ["Brl/BIP%", "PulledBrl%"] if c in df.columns]
-    if len(keep) == 1:
+    if not brl_col:
         return pd.DataFrame()
 
-    df = df[keep].copy()
-    for col in keep[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.rename(columns={brl_col: "Brl/BIP%"})
+    df = df[["Player", "Brl/BIP%"]].copy()
+    df["Brl/BIP%"] = pd.to_numeric(df["Brl/BIP%"], errors="coerce")
     return df.dropna(subset=["Player"])
-
-# ── Savant: pitch discipline leaderboard — SwStr% ─────────────────────────────
-@st.cache_data(ttl=3600)
-def fetch_savant_swstr(season: int) -> pd.DataFrame:
-    """
-    Savant pitch-level discipline CSV — whiff_percent = SwStr%
-    (swings and misses / total pitches seen)
-    """
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/statcast"
-        f"?type=batter&id=whiff_percent&sportId=1"
-        f"&season={season}&season_end={season}&min=50&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    df = add_player_col(df)
-    if "Player" not in df.columns:
-        return pd.DataFrame()
-
-    # Find whiff/swstr column
-    whiff_col = next(
-        (c for c in df.columns
-         if c.lower() in ("whiff_percent", "whiff_pct", "swstr_percent", "swstr%")),
-        next((c for c in df.columns if "whiff" in c.lower()), None)
-    )
-    if not whiff_col:
-        return pd.DataFrame()
-
-    df = df.rename(columns={whiff_col: "SwStr%"})
-    df["SwStr%"] = pd.to_numeric(df["SwStr%"], errors="coerce")
-    # Convert decimal to percent if needed
-    if df["SwStr%"].dropna().max() < 1.0:
-        df["SwStr%"] = df["SwStr%"] * 100
-
-    return df[["Player", "SwStr%"]].dropna(subset=["Player"])
 
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
@@ -285,7 +225,7 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 SCORE_WEIGHTS = {
     "HH%":          0.25,
     "Brl/BIP%":     0.25,
-    "ISO":          0.20,
+    "SLG":          0.20,
     "SweetSpot%":   0.10,
     "Park factor":  0.10,
     "Pitcher HR/9": 0.10,
@@ -294,15 +234,13 @@ SCORE_WEIGHTS = {
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     df    = df.copy()
     score = pd.Series(0.0, index=df.index)
-
     for col, weight in SCORE_WEIGHTS.items():
         if col not in df.columns or df[col].isna().all():
             continue
-        vals  = df[col].fillna(df[col].median())
+        vals   = df[col].fillna(df[col].median())
         lo, hi = vals.min(), vals.max()
         scaled = (vals - lo) / (hi - lo) if hi > lo else pd.Series(0.5, index=df.index)
         score += scaled * weight
-
     s_min, s_max = score.min(), score.max()
     df["Matchup score"] = (
         ((score - s_min) / (s_max - s_min) * 100).round(1)
@@ -311,8 +249,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%",
-                 "SwStr%", "Brl/BIP%", "PulledBrl%"]
+STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%"]
 
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_pa, min_hr):
@@ -335,7 +272,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             "Batting team": batting_team,
             "Opp pitcher":  opp_pitcher,
             "HR":           b["HR"],
-            "ISO":          b["ISO"],
+            "SLG":          b["SLG"],
             "Park factor":  park_factor,
             "Pitcher HR/9": opp_hr9,
         }
@@ -344,20 +281,18 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         rows.append(row)
     return rows
 
-# ── Display and styling ────────────────────────────────────────────────────────
+# ── Display columns ────────────────────────────────────────────────────────────
 DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR",
-    "HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%",
-    "SwStr%", "Brl/BIP%", "PulledBrl%",
-    "ISO",
+    "HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%",
+    "SLG",
     "Park factor", "Pitcher HR/9",
     "Matchup score",
 ]
 
-HIGH_GOOD = ["HH%", "Avg EV", "FB%", "SweetSpot%", "Brl/BIP%", "PulledBrl%",
-             "ISO", "Park factor", "Pitcher HR/9", "Matchup score"]
-LOW_GOOD  = ["SwStr%"]
+HIGH_GOOD = ["HH%", "Avg EV", "FB%", "SweetSpot%", "Brl/BIP%",
+             "SLG", "Park factor", "Pitcher HR/9", "Matchup score"]
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
@@ -366,10 +301,8 @@ def style_table(df: pd.DataFrame, cols: list):
         "Avg LA":        "{:.1f}°",
         "FB%":           "{:.1f}%",
         "SweetSpot%":    "{:.1f}%",
-        "SwStr%":        "{:.1f}%",
         "Brl/BIP%":      "{:.1f}%",
-        "PulledBrl%":    "{:.1f}%",
-        "ISO":           "{:.3f}",
+        "SLG":           "{:.3f}",
         "Park factor":   "{:.2f}",
         "Pitcher HR/9":  "{:.2f}",
         "Matchup score": "{:.1f}",
@@ -379,9 +312,6 @@ def style_table(df: pd.DataFrame, cols: list):
     for col in HIGH_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn")
-    for col in LOW_GOOD:
-        if col in cols and df[col].notna().any():
-            styled = styled.background_gradient(subset=[col], cmap="RdYlGn_r")
     return styled
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -394,21 +324,19 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Colour guide**")
     st.markdown("🟢 Green = best · 🟡 Yellow = average · 🔴 Red = bad")
-    st.caption("SwStr% reversed — green = low whiffs (good contact).")
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
-    st.caption("100 = best matchup on today's slate. Scores are relative to all batters playing today.")
-    st.caption("Weighted formula:")
+    st.caption("100 = best matchup on today's slate.")
     st.caption("• HH% — 25%")
     st.caption("• Brl/BIP% — 25%")
-    st.caption("• ISO — 20%")
+    st.caption("• SLG — 20%")
     st.caption("• SweetSpot% — 10%")
     st.caption("• Park factor — 10%")
     st.caption("• Pitcher HR/9 — 10%")
     st.markdown("---")
     st.markdown("**Data sources**")
-    st.caption("MLB Stats API — HR, ISO, schedule, pitchers")
-    st.caption("Baseball Savant — all Statcast stats")
+    st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
+    st.caption("Baseball Savant — HH%, EV, LA, FB%, SweetSpot%, Brl/BIP%")
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -422,7 +350,6 @@ with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
     hitting_df = fetch_hitting_stats(season)
     sc_main    = fetch_savant_main(season)
     sc_barrels = fetch_savant_barrels(season)
-    sc_swstr   = fetch_savant_swstr(season)
     pitcher_df = fetch_pitcher_stats(season)
 
 if not games:
@@ -432,8 +359,8 @@ if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
 
-# ── Merge all Savant sources ───────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_swstr]:
+# ── Merge Statcast ─────────────────────────────────────────────────────────────
+for src in [sc_main, sc_barrels]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
 
@@ -441,11 +368,9 @@ for col in STATCAST_COLS:
     if col not in hitting_df.columns:
         hitting_df[col] = None
 
-# Status banner — only show if something failed
 failed = []
 if sc_main.empty:    failed.append("EV / HH% / LA / FB% / SweetSpot%")
-if sc_barrels.empty: failed.append("Brl/BIP% / PulledBrl%")
-if sc_swstr.empty:   failed.append("SwStr%")
+if sc_barrels.empty: failed.append("Brl/BIP%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
 
@@ -462,7 +387,7 @@ selected_games = (
           if f"{g['away_team']} @ {g['home_team']}  —  {g['time']}" == choice]
 )
 
-# ── Build all rows first so 0-100 score is relative to full slate ──────────────
+# ── Build all rows then score ──────────────────────────────────────────────────
 all_raw = []
 for g in selected_games:
     for batting_id, batting_team, opp_pitcher, key in [
@@ -508,7 +433,6 @@ for g in selected_games:
             f" batting vs {opp_pitcher}</span></div>",
             unsafe_allow_html=True,
         )
-
         team_df = (
             full_df[full_df["_key"] == key]
             .drop(columns=["_key"])
@@ -567,7 +491,7 @@ with col_b:
             color="Matchup score", color_continuous_scale="RdYlGn",
             range_color=[0, 100],
             size="HR",
-            hover_data=["Batting team", "Opp pitcher", "ISO", "Avg EV", "SweetSpot%"],
+            hover_data=["Batting team", "Opp pitcher", "SLG", "Avg EV", "SweetSpot%"],
         )
         fig2.update_traces(textposition="top center", textfont_size=9)
         fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=440)
