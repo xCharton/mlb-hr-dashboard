@@ -80,9 +80,9 @@ def fetch_schedule(game_date: str):
             })
     return games
 
-# ── Fetch MLB hitting stats ────────────────────────────────────────────────────
+# ── Fetch full-season hitting stats ───────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_hitting_stats(season: int) -> pd.DataFrame:
+def fetch_season_stats(season: int) -> pd.DataFrame:
     url = (
         f"https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=hitting&gameType=R"
@@ -101,10 +101,8 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
         stat   = s.get("stat", {})
         player = s.get("player", {})
         team   = s.get("team", {})
-        pa     = int(stat.get("plateAppearances", 0) or 0)
-        if pa < 30:
-            continue
-        hr = int(stat.get("homeRuns", 0) or 0)
+        ab     = int(stat.get("atBats", 0) or 0)
+        hr     = int(stat.get("homeRuns", 0) or 0)
 
         def sf(key):
             v = stat.get(key)
@@ -113,14 +111,62 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
             except (ValueError, TypeError):
                 return 0.0
 
-        slg = sf("sluggingPercentage")
-
         rows.append({
             "player_id": player.get("id"),
             "Player":    player.get("fullName", "Unknown"),
             "team_id":   team.get("id"),
             "Team":      team.get("name", "Unknown"),
-            "PA": pa, "HR": hr, "SLG": slg,
+            "AB": ab,
+            "HR": hr,
+            "SLG": sf("sluggingPercentage"),
+        })
+    return pd.DataFrame(rows)
+
+# ── Fetch last N games stats for ALL players on a team ────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_last_n_games(team_id: int, season: int, n_games: int) -> pd.DataFrame:
+    """
+    Pulls each player's game log for the season, keeps last N games,
+    aggregates AB, HR, SLG for that window.
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/stats"
+        f"?stats=gameLog&group=hitting&gameType=R"
+        f"&season={season}&teamId={team_id}&limit=9999"
+    )
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        splits = r.json()["stats"][0]["splits"]
+    except Exception:
+        return pd.DataFrame()
+
+    # Group by player, take last N game entries
+    player_games: dict = {}
+    for s in splits:
+        stat   = s.get("stat", {})
+        player = s.get("player", {})
+        pid    = player.get("id")
+        name   = player.get("fullName", "Unknown")
+        if pid not in player_games:
+            player_games[pid] = {"name": name, "games": []}
+        player_games[pid]["games"].append(stat)
+
+    rows = []
+    for pid, data in player_games.items():
+        games = data["games"][-n_games:]   # last N games only
+        if not games:
+            continue
+        ab  = sum(int(g.get("atBats", 0) or 0) for g in games)
+        hr  = sum(int(g.get("homeRuns", 0) or 0) for g in games)
+        tb  = sum(int(g.get("totalBases", 0) or 0) for g in games)
+        slg = round(tb / ab, 3) if ab > 0 else 0.0
+        rows.append({
+            "player_id": pid,
+            "Player":    data["name"],
+            "AB":        ab,
+            "HR":        hr,
+            "SLG":       slg,
         })
     return pd.DataFrame(rows)
 
@@ -157,7 +203,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["Player"])
 
-# ── Savant: barrel leaderboard — Brl/BIP% ────────────────────────────────────
+# ── Savant: barrel leaderboard — Brl/BIP% ─────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_savant_barrels(season: int) -> pd.DataFrame:
     url = (
@@ -223,15 +269,15 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH%":          0.20,   # hard hit rate
-    "Brl/BIP%":     0.20,   # barrel rate
-    "SLG":          0.15,   # power production
-    "Avg EV":       0.15,   # exit velocity
-    "Avg LA":       0.10,   # launch angle (higher = more fly balls)
-    "FB%":          0.10,   # fly ball rate
-    "SweetSpot%":   0.05,   # sweet spot contact
-    "Park factor":  0.05,   # venue boost
-    "Pitcher HR/9": 0.10,   # matchup vulnerability
+    "HH%":          0.20,
+    "Brl/BIP%":     0.20,
+    "SLG":          0.15,
+    "Avg EV":       0.15,
+    "Avg LA":       0.10,
+    "FB%":          0.10,
+    "Pitcher HR/9": 0.10,
+    "SweetSpot%":   0.05,
+    "Park factor":  0.05,
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -255,10 +301,10 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%"]
 
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
-                   hitting_df, pitcher_df, min_pa, min_hr):
+                   hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
         (hitting_df["team_id"] == batting_id) &
-        (hitting_df["PA"] >= min_pa) &
+        (hitting_df["AB"] >= min_ab) &
         (hitting_df["HR"] >= min_hr)
     ]
     if batters.empty:
@@ -275,6 +321,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             "Batting team": batting_team,
             "Opp pitcher":  opp_pitcher,
             "HR":           b["HR"],
+            "AB":           b["AB"],
             "SLG":          b["SLG"],
             "Park factor":  park_factor,
             "Pitcher HR/9": opp_hr9,
@@ -287,7 +334,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
 # ── Display columns ────────────────────────────────────────────────────────────
 DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
-    "HR",
+    "HR", "AB",
     "HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%",
     "SLG",
     "Park factor", "Pitcher HR/9",
@@ -322,8 +369,20 @@ with st.sidebar:
     st.header("Settings")
     season        = st.selectbox("Season", [2026, 2025, 2024], index=0)
     selected_date = st.date_input("Game date", value=date.today())
-    min_pa        = st.slider("Min plate appearances", 30, 300, 80, step=10)
-    min_hr        = st.slider("Min HR this season",     0,  20,  3, step=1)
+
+    st.markdown("---")
+    st.markdown("**Time window**")
+    time_window = st.radio(
+        "",
+        ["Full season", "Last 10 games", "Last 5 games", "Last 3 games"],
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
+    st.markdown("**Minimum filters**")
+    min_ab = st.slider("Min at bats", 0, 100, 20, step=5)
+    min_hr = st.slider("Min HR",      0,  20,  0, step=1)
+
     st.markdown("---")
     st.markdown("**Colour guide**")
     st.markdown("🟢 Green = best · 🟡 Yellow = average · 🔴 Red = bad")
@@ -344,16 +403,25 @@ with st.sidebar:
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
     st.caption("Baseball Savant — HH%, EV, LA, FB%, SweetSpot%, Brl/BIP%")
 
-# ── Load data ──────────────────────────────────────────────────────────────────
+# ── Derived settings ───────────────────────────────────────────────────────────
+n_games_map = {
+    "Full season":   None,
+    "Last 10 games": 10,
+    "Last 5 games":  5,
+    "Last 3 games":  3,
+}
+n_games = n_games_map[time_window]
+
+# ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
 st.caption(
     f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
+    f"Window: **{time_window}** · "
     f"Stats refresh hourly · Schedule refreshes every 30 min"
 )
 
-with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
+with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     games      = fetch_schedule(date_str)
-    hitting_df = fetch_hitting_stats(season)
     sc_main    = fetch_savant_main(season)
     sc_barrels = fetch_savant_barrels(season)
     pitcher_df = fetch_pitcher_stats(season)
@@ -361,11 +429,35 @@ with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
     st.stop()
+
+# ── Load hitting stats — season or recent ─────────────────────────────────────
+# For full season: one call, already has team_id
+# For last N games: call per team in today's games, merge Statcast after
+if n_games is None:
+    with st.spinner("Loading full season hitting stats..."):
+        hitting_df = fetch_season_stats(season)
+else:
+    # Collect all unique team IDs from today's games
+    team_ids = set()
+    for g in games:
+        if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
+        if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
+
+    with st.spinner(f"Loading last {n_games} games for each team..."):
+        frames = []
+        for tid, tname in team_ids:
+            df_t = fetch_last_n_games(tid, season, n_games)
+            if not df_t.empty:
+                df_t["team_id"] = tid
+                df_t["Team"]    = tname
+                frames.append(df_t)
+        hitting_df = pd.concat(frames).reset_index(drop=True) if frames else pd.DataFrame()
+
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
 
-# ── Merge Statcast ─────────────────────────────────────────────────────────────
+# ── Merge Statcast (always full-season — Savant doesn't do recent splits) ─────
 for src in [sc_main, sc_barrels]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
@@ -374,11 +466,19 @@ for col in STATCAST_COLS:
     if col not in hitting_df.columns:
         hitting_df[col] = None
 
+# Status banner
 failed = []
 if sc_main.empty:    failed.append("EV / HH% / LA / FB% / SweetSpot%")
 if sc_barrels.empty: failed.append("Brl/BIP%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
+
+if n_games is not None:
+    st.info(
+        f"ℹ️ Hitting stats (HR, AB, SLG) reflect the **last {n_games} games**. "
+        f"Statcast metrics (HH%, EV, Barrel%, etc.) always use the full season — "
+        f"Savant doesn't provide recent splits."
+    )
 
 # ── Game selector ──────────────────────────────────────────────────────────────
 st.subheader("Filter by game")
@@ -393,7 +493,7 @@ selected_games = (
           if f"{g['away_team']} @ {g['home_team']}  —  {g['time']}" == choice]
 )
 
-# ── Build all rows then score ──────────────────────────────────────────────────
+# ── Build all rows and score ───────────────────────────────────────────────────
 all_raw = []
 for g in selected_games:
     for batting_id, batting_team, opp_pitcher, key in [
@@ -403,13 +503,13 @@ for g in selected_games:
          f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
     ]:
         rows = build_raw_rows(batting_id, batting_team, opp_pitcher, g["home_team"],
-                              hitting_df, pitcher_df, min_pa, min_hr)
+                              hitting_df, pitcher_df, min_ab, min_hr)
         for row in rows:
             row["_key"] = key
         all_raw.extend(rows)
 
 if not all_raw:
-    st.info("No batters match your filters. Try lowering Min PA or Min HR.")
+    st.info("No batters match your filters. Try lowering Min AB or Min HR.")
     st.stop()
 
 full_df = compute_scores(pd.DataFrame(all_raw))
