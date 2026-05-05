@@ -371,14 +371,6 @@ with st.sidebar:
     selected_date = st.date_input("Game date", value=date.today())
 
     st.markdown("---")
-    st.markdown("**Time window**")
-    time_window = st.radio(
-        "",
-        ["Full season", "Last 10 games", "Last 5 games", "Last 3 games"],
-        label_visibility="collapsed",
-    )
-
-    st.markdown("---")
     st.markdown("**Minimum filters**")
     min_ab = st.slider("Min at bats", 0, 100, 20, step=5)
     min_hr = st.slider("Min HR",      0,  20,  0, step=1)
@@ -403,20 +395,10 @@ with st.sidebar:
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
     st.caption("Baseball Savant — HH%, EV, LA, FB%, SweetSpot%, Brl/BIP%")
 
-# ── Derived settings ───────────────────────────────────────────────────────────
-n_games_map = {
-    "Full season":   None,
-    "Last 10 games": 10,
-    "Last 5 games":  5,
-    "Last 3 games":  3,
-}
-n_games = n_games_map[time_window]
-
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
 st.caption(
     f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
-    f"Window: **{time_window}** · "
     f"Stats refresh hourly · Schedule refreshes every 30 min"
 )
 
@@ -430,28 +412,8 @@ if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
     st.stop()
 
-# ── Load hitting stats — season or recent ─────────────────────────────────────
-# For full season: one call, already has team_id
-# For last N games: call per team in today's games, merge Statcast after
-if n_games is None:
-    with st.spinner("Loading full season hitting stats..."):
-        hitting_df = fetch_season_stats(season)
-else:
-    # Collect all unique team IDs from today's games
-    team_ids = set()
-    for g in games:
-        if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
-        if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
-
-    with st.spinner(f"Loading last {n_games} games for each team..."):
-        frames = []
-        for tid, tname in team_ids:
-            df_t = fetch_last_n_games(tid, season, n_games)
-            if not df_t.empty:
-                df_t["team_id"] = tid
-                df_t["Team"]    = tname
-                frames.append(df_t)
-        hitting_df = pd.concat(frames).reset_index(drop=True) if frames else pd.DataFrame()
+with st.spinner("Loading full season hitting stats..."):
+    hitting_df = fetch_season_stats(season)
 
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
@@ -472,13 +434,6 @@ if sc_main.empty:    failed.append("EV / HH% / LA / FB% / SweetSpot%")
 if sc_barrels.empty: failed.append("Brl/BIP%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
-
-if n_games is not None:
-    st.info(
-        f"ℹ️ Hitting stats (HR, AB, SLG) reflect the **last {n_games} games**. "
-        f"Statcast metrics (HH%, EV, Barrel%, etc.) always use the full season — "
-        f"Savant doesn't provide recent splits."
-    )
 
 # ── Game selector ──────────────────────────────────────────────────────────────
 st.subheader("Filter by game")
