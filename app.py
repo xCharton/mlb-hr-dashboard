@@ -30,8 +30,12 @@ PARK_FACTORS = {
 
 # ── Savant name helper ─────────────────────────────────────────────────────────
 def savant_name(row):
-    if "last_name" in row.index and "first_name" in row.index:
-        return f"{str(row['first_name']).strip()} {str(row['last_name']).strip()}"
+    # Savant uses a single col "last_name, first_name" with a comma
+    for col in row.index:
+        if "last_name" in col.lower() and "first_name" in col.lower():
+            parts = [p.strip() for p in str(row[col]).split(",")]
+            if len(parts) == 2:
+                return f"{parts[1]} {parts[0]}"
     if "player_name" in row.index:
         name = str(row["player_name"])
         if "," in name:
@@ -124,7 +128,13 @@ def fetch_hitting_stats(season: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-# ── Fetch Statcast — main leaderboard (HH%, Avg EV, Avg LA, FB%) ──────────────
+# ── Fetch Statcast main (EV, LA, HH%, FB%, SweetSpot%) ────────────────────────
+# Confirmed Savant column names as of 2025/2026:
+#   avg_hit_speed       → Avg EV
+#   avg_hit_angle       → Avg LA
+#   ev95percent         → HH%   (% of batted balls 95+ mph = hard hit)
+#   fbld                → FB%   (fly ball + line drive rate, use as FB proxy)
+#   anglesweetspotpercent → SweetSpot%
 @st.cache_data(ttl=3600)
 def fetch_statcast_main(season: int) -> pd.DataFrame:
     url = (
@@ -136,15 +146,35 @@ def fetch_statcast_main(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-    except Exception as e:
-        st.warning(f"Savant fetch failed: {e}")
+    except Exception:
         return pd.DataFrame()
 
-    st.info(f"Savant columns: {list(df.columns[:15])}")  # show us first 15 cols
-    df["Player"] = df.apply(savant_name, axis=1)
-    return df
+    # The name column is literally called "last_name, first_name" (with comma+space)
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+    if name_col:
+        df["Player"] = df[name_col].apply(
+            lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+        )
+    else:
+        df["Player"] = df.apply(savant_name, axis=1)
 
-# ── Fetch Statcast — bat tracking / swing metrics (SwStr%) ────────────────────
+    rename = {
+        "avg_hit_speed":          "Avg EV",
+        "avg_hit_angle":          "Avg LA",
+        "ev95percent":            "HH%",
+        "anglesweetspotpercent":  "SweetSpot%",
+        "fbld":                   "FB%",
+    }
+    df = df.rename(columns=rename)
+
+    keep = ["Player"] + [c for c in rename.values() if c in df.columns]
+    df   = df[keep].copy()
+    for col in keep[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df.dropna(subset=["Player"])
+
+# ── Fetch Statcast swing/whiff (SwStr%) ───────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_statcast_swing(season: int) -> pd.DataFrame:
     url = (
@@ -161,21 +191,26 @@ def fetch_statcast_swing(season: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-    df["Player"] = df.apply(savant_name, axis=1)
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+    if name_col:
+        df["Player"] = df[name_col].apply(
+            lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+        )
+    else:
+        df["Player"] = df.apply(savant_name, axis=1)
 
-    # SwStr% = whiff_percent in Savant bat-tracking
-    swstr_col = next(
+    whiff_col = next(
         (c for c in df.columns if "whiff" in c.lower()),
         next((c for c in df.columns if "swstr" in c.lower()), None)
     )
-    if swstr_col is None:
+    if not whiff_col:
         return pd.DataFrame()
 
-    df = df.rename(columns={swstr_col: "SwStr%"})
+    df = df.rename(columns={whiff_col: "SwStr%"})
     df["SwStr%"] = pd.to_numeric(df["SwStr%"], errors="coerce")
     return df[["Player", "SwStr%"]].dropna(subset=["Player"])
 
-# ── Fetch Statcast — barrels (PulledBrl%, Brl/BIP%) ──────────────────────────
+# ── Fetch Statcast barrels (Brl/BIP%, PulledBrl%) ────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_statcast_barrels(season: int) -> pd.DataFrame:
     url = (
@@ -190,18 +225,21 @@ def fetch_statcast_barrels(season: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-    df["Player"] = df.apply(savant_name, axis=1)
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+    if name_col:
+        df["Player"] = df[name_col].apply(
+            lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+        )
+    else:
+        df["Player"] = df.apply(savant_name, axis=1)
 
-    col_map = {
-        "barrel_batted_rate": "Brl/BIP%",
-        "pulled_barrel":      "PulledBrl%",
-        "brl_percent":        "Brl/BIP%",   # fallback name
-    }
+    # Find barrel cols — Savant uses brl_percent and pulled_brl_percent
+    brl_col    = next((c for c in df.columns if c.lower() in ("brl_percent", "barrel_batted_rate", "brl_pa")), None)
+    pulled_col = next((c for c in df.columns if "pull" in c.lower() and "brl" in c.lower()), None)
+
     rename = {}
-    for src, dst in col_map.items():
-        match = next((c for c in df.columns if src.lower() in c.lower()), None)
-        if match and dst not in rename.values():
-            rename[match] = dst
+    if brl_col:    rename[brl_col]    = "Brl/BIP%"
+    if pulled_col: rename[pulled_col] = "PulledBrl%"
 
     df = df.rename(columns=rename)
     keep = ["Player"] + [c for c in ["Brl/BIP%", "PulledBrl%"] if c in df.columns]
@@ -289,7 +327,7 @@ def build_team_matchup(batting_id, batting_team, opp_pitcher_name, home_team,
     out.index += 1
     return out
 
-# ── Display columns (final order) ─────────────────────────────────────────────
+# ── Display columns ────────────────────────────────────────────────────────────
 DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR",
@@ -300,11 +338,10 @@ DISPLAY_COLS = [
     "Matchup score",
 ]
 
-# ── Colour coding: RdYlGn = red(bad)→yellow→green(best) ──────────────────────
-# SwStr% is LOWER = better for batter (fewer whiffs), so reversed
-HIGH_GOOD  = ["HH%", "Avg EV", "FB%", "SweetSpot%", "Brl/BIP%", "PulledBrl%",
-              "ISO", "Park factor", "Pitcher HR/9", "Matchup score"]
-LOW_GOOD   = ["SwStr%"]   # lower whiff rate = better contact = green when low
+# ── Colour coding ──────────────────────────────────────────────────────────────
+HIGH_GOOD = ["HH%", "Avg EV", "FB%", "SweetSpot%", "Brl/BIP%", "PulledBrl%",
+             "ISO", "Park factor", "Pitcher HR/9", "Matchup score"]
+LOW_GOOD  = ["SwStr%"]   # fewer whiffs = better = green when low
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
@@ -320,17 +357,14 @@ def style_table(df: pd.DataFrame, cols: list):
         "Park factor":  "{:.2f}",
         "Pitcher HR/9": "{:.2f}",
     }
-    fmt = {k: v for k, v in fmt.items() if k in cols}
-
+    fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
 
     for col in HIGH_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn")
-
     for col in LOW_GOOD:
         if col in cols and df[col].notna().any():
-            # Reversed: low SwStr% = green (good contact), high = red (lots of whiffs)
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn_r")
 
     return styled
@@ -344,17 +378,9 @@ with st.sidebar:
     min_hr        = st.slider("Min HR this season",     0,  20,  3, step=1)
     st.markdown("---")
     st.markdown("**Colour guide**")
-    st.markdown("🟢 Green = best")
-    st.markdown("🟡 Yellow = average")
-    st.markdown("🔴 Red = bad")
-    st.caption("SwStr% is reversed — green means low whiff rate (good contact).")
+    st.markdown("🟢 Green = best · 🟡 Yellow = average · 🔴 Red = bad")
+    st.caption("SwStr% reversed — green = low whiffs (good contact).")
     st.markdown("---")
-    if st.checkbox("Show debug info"):
-        st.write("Statcast main columns:", list(sc_main.columns) if not sc_main.empty else "EMPTY")
-        st.write("Swing columns:", list(sc_swing.columns) if not sc_swing.empty else "EMPTY")
-        st.write("Barrel columns:", list(sc_barrels.columns) if not sc_barrels.empty else "EMPTY")
-        st.write("Hitting df columns:", list(hitting_df.columns))
-        st.write("HH% sample:", hitting_df["HH%"].dropna().head(3).tolist() if "HH%" in hitting_df.columns else "MISSING")
     st.markdown("**Matchup score**")
     st.caption("ISO × HH% × Brl/BIP% × Park factor × Pitcher multiplier")
 
@@ -366,12 +392,12 @@ st.caption(
 )
 
 with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
-    games          = fetch_schedule(date_str)
-    hitting_df     = fetch_hitting_stats(season)
-    sc_main        = fetch_statcast_main(season)
-    sc_swing       = fetch_statcast_swing(season)
-    sc_barrels     = fetch_statcast_barrels(season)
-    pitcher_df     = fetch_pitcher_stats(season)  
+    games      = fetch_schedule(date_str)
+    hitting_df = fetch_hitting_stats(season)
+    sc_main    = fetch_statcast_main(season)
+    sc_swing   = fetch_statcast_swing(season)
+    sc_barrels = fetch_statcast_barrels(season)
+    pitcher_df = fetch_pitcher_stats(season)
 
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
@@ -380,18 +406,16 @@ if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
 
-# ── Merge all Statcast data ────────────────────────────────────────────────────
+# ── Merge Statcast ─────────────────────────────────────────────────────────────
 for sc_df in [sc_main, sc_swing, sc_barrels]:
     if not sc_df.empty:
         hitting_df = hitting_df.merge(sc_df, on="Player", how="left")
 
-# Fill any missing Statcast cols with None
 for col in STATCAST_COLS:
     if col not in hitting_df.columns:
         hitting_df[col] = None
 
-sc_loaded = not sc_main.empty
-if not sc_loaded:
+if sc_main.empty:
     st.warning(
         "⚠️ Baseball Savant data unavailable right now — "
         "Statcast columns show '—'. All other data is current."
@@ -414,36 +438,30 @@ selected_games = (
 any_data = False
 
 for g in selected_games:
-    away_team    = g["away_team"]
-    home_team    = g["home_team"]
-    away_pitcher = g["away_pitcher"]
-    home_pitcher = g["home_pitcher"]
-    pf           = PARK_FACTORS.get(home_team, 1.00)
-    pf_emoji     = "🟢" if pf >= 1.05 else "🔴" if pf <= 0.95 else "⚪"
-    pf_label     = "Hitter friendly" if pf >= 1.05 else "Pitcher friendly" if pf <= 0.95 else "Neutral park"
+    pf       = PARK_FACTORS.get(g["home_team"], 1.00)
+    pf_emoji = "🟢" if pf >= 1.05 else "🔴" if pf <= 0.95 else "⚪"
+    pf_label = "Hitter friendly" if pf >= 1.05 else "Pitcher friendly" if pf <= 0.95 else "Neutral park"
 
     st.markdown("---")
-
-    # ── Game header ───────────────────────────────────────────────────────────
-    st.markdown(f"### ⚾ {away_team} @ {home_team}")
+    st.markdown(f"### ⚾ {g['away_team']} @ {g['home_team']}")
     st.caption(f"{g['time']} · {g['venue']} · {pf_emoji} {pf_label} (PF {pf:.2f})")
 
-    # ── AWAY batting team (stacked on top) ────────────────────────────────────
+    # Away team — top
     st.markdown(
         f"<div style='background:var(--color-background-secondary);"
         f"border-left:3px solid var(--color-border-info);"
         f"padding:8px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
-        f"<span style='font-size:14px;font-weight:500'>{away_team}</span>"
+        f"<span style='font-size:14px;font-weight:500'>{g['away_team']}</span>"
         f"<span style='font-size:12px;color:var(--color-text-secondary)'>"
-        f" batting vs {home_pitcher}</span></div>",
-        unsafe_allow_html=True
+        f" batting vs {g['home_pitcher']}</span></div>",
+        unsafe_allow_html=True,
     )
     away_df = build_team_matchup(
-        g["away_id"], away_team, home_pitcher, home_team,
-        hitting_df, pitcher_df, min_pa, min_hr
+        g["away_id"], g["away_team"], g["home_pitcher"], g["home_team"],
+        hitting_df, pitcher_df, min_pa, min_hr,
     )
     if away_df.empty:
-        st.info(f"No {away_team} batters match current filters.")
+        st.info(f"No {g['away_team']} batters match current filters.")
     else:
         any_data = True
         valid    = [c for c in DISPLAY_COLS if c in away_df.columns]
@@ -451,22 +469,22 @@ for g in selected_games:
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # ── HOME batting team (stacked below) ────────────────────────────────────
+    # Home team — below
     st.markdown(
         f"<div style='background:var(--color-background-secondary);"
         f"border-left:3px solid var(--color-border-success);"
         f"padding:8px 14px;border-radius:var(--border-radius-md);margin:4px 0 4px'>"
-        f"<span style='font-size:14px;font-weight:500'>{home_team}</span>"
+        f"<span style='font-size:14px;font-weight:500'>{g['home_team']}</span>"
         f"<span style='font-size:12px;color:var(--color-text-secondary)'>"
-        f" batting vs {away_pitcher}</span></div>",
-        unsafe_allow_html=True
+        f" batting vs {g['away_pitcher']}</span></div>",
+        unsafe_allow_html=True,
     )
     home_df = build_team_matchup(
-        g["home_id"], home_team, away_pitcher, home_team,
-        hitting_df, pitcher_df, min_pa, min_hr
+        g["home_id"], g["home_team"], g["away_pitcher"], g["home_team"],
+        hitting_df, pitcher_df, min_pa, min_hr,
     )
     if home_df.empty:
-        st.info(f"No {home_team} batters match current filters.")
+        st.info(f"No {g['home_team']} batters match current filters.")
     else:
         any_data = True
         valid    = [c for c in DISPLAY_COLS if c in home_df.columns]
@@ -476,7 +494,7 @@ if not any_data:
     st.info("No batters match your filters. Try lowering Min PA or Min HR.")
     st.stop()
 
-# ── Top picks chart across full slate ─────────────────────────────────────────
+# ── Top picks chart ────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("Top picks across today's slate")
 
