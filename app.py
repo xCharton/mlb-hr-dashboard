@@ -107,9 +107,9 @@ def fetch_season_stats(season: int) -> pd.DataFrame:
         def sf(key):
             v = stat.get(key)
             try:
-                return float(v) if v not in (None, ".---", "-.--") else 0.0
+                return float(v) if v not in (None, ".---", "-.--", "-.---") else None
             except (ValueError, TypeError):
-                return 0.0
+                return None
 
         rows.append({
             "player_id": player.get("id"),
@@ -118,7 +118,7 @@ def fetch_season_stats(season: int) -> pd.DataFrame:
             "Team":      team.get("name", "Unknown"),
             "AB": ab,
             "HR": hr,
-            "SLG": sf("sluggingPercentage"),
+            "SLG": (lambda v: v if v and v > 0 else None)(sf("sluggingPercentage")),
         })
     return pd.DataFrame(rows)
 
