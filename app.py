@@ -136,30 +136,13 @@ def fetch_statcast_main(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
+    except Exception as e:
+        st.warning(f"Savant fetch failed: {e}")
         return pd.DataFrame()
 
+    st.info(f"Savant columns: {list(df.columns[:15])}")  # show us first 15 cols
     df["Player"] = df.apply(savant_name, axis=1)
-
-    col_map = {
-        "hard_hit_percent":   "HH%",
-        "launch_speed":       "Avg EV",
-        "launch_angle":       "Avg LA",
-        "fb_percent":         "FB%",
-        "sweet_spot_percent": "SweetSpot%",
-    }
-    rename = {}
-    for src, dst in col_map.items():
-        match = next((c for c in df.columns if src.lower() in c.lower()), None)
-        if match:
-            rename[match] = dst
-
-    df = df.rename(columns=rename)
-    keep = ["Player"] + [c for c in col_map.values() if c in df.columns]
-    df   = df[keep].copy()
-    for col in keep[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna(subset=["Player"])
+    return df
 
 # ── Fetch Statcast — bat tracking / swing metrics (SwStr%) ────────────────────
 @st.cache_data(ttl=3600)
@@ -388,15 +371,8 @@ with st.spinner("Loading schedule, MLB stats, and Statcast data..."):
     sc_main        = fetch_statcast_main(season)
     sc_swing       = fetch_statcast_swing(season)
     sc_barrels     = fetch_statcast_barrels(season)
-    pitcher_df     = fetch_pitcher_stats(season)
-    
-if st.checkbox("Show debug info"):
-    st.write("Statcast main columns:", list(sc_main.columns) if not sc_main.empty else "EMPTY")
-    st.write("Swing columns:", list(sc_swing.columns) if not sc_swing.empty else "EMPTY")
-    st.write("Barrel columns:", list(sc_barrels.columns) if not sc_barrels.empty else "EMPTY")
-    st.write("Hitting df columns:", list(hitting_df.columns))
-    st.write("HH% sample:", hitting_df["HH%"].dropna().head(3).tolist() if "HH%" in hitting_df.columns else "MISSING")
-    
+    pitcher_df     = fetch_pitcher_stats(season)  
+
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
     st.stop()
