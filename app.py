@@ -101,15 +101,10 @@ def fetch_season_stats(season: int) -> pd.DataFrame:
         stat   = s.get("stat", {})
         player = s.get("player", {})
         team   = s.get("team", {})
-        ab     = int(stat.get("atBats", 0) or 0)
-        hr     = int(stat.get("homeRuns", 0) or 0)
-
-        def sf(key):
-            v = stat.get(key)
-            try:
-                return float(v) if v not in (None, ".---", "-.--", "-.---") else None
-            except (ValueError, TypeError):
-                return None
+        ab  = int(stat.get("atBats", 0) or 0)
+        hr  = int(stat.get("homeRuns", 0) or 0)
+        tb  = int(stat.get("totalBases", 0) or 0)
+        slg = round(tb / ab, 3) if ab > 0 else None
 
         rows.append({
             "player_id": player.get("id"),
@@ -118,7 +113,7 @@ def fetch_season_stats(season: int) -> pd.DataFrame:
             "Team":      team.get("name", "Unknown"),
             "AB": ab,
             "HR": hr,
-            "SLG": (lambda v: v if v and v > 0 else None)(sf("sluggingPercentage")),
+            "SLG": slg,
         })
     return pd.DataFrame(rows)
 
@@ -269,9 +264,8 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH%":          0.20,
-    "Brl/BIP%":     0.20,
-    "SLG":          0.15,
+    "HH%":          0.25,
+    "Brl/BIP%":     0.25,
     "Avg EV":       0.15,
     "Avg LA":       0.10,
     "FB%":          0.10,
@@ -381,9 +375,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• HH% — 20%")
-    st.caption("• Brl/BIP% — 20%")
-    st.caption("• SLG — 15%")
+    st.caption("• HH% — 25%")
+    st.caption("• Brl/BIP% — 25%")
     st.caption("• Avg EV — 15%")
     st.caption("• Avg LA — 10%")
     st.caption("• FB% — 10%")
