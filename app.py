@@ -223,12 +223,15 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH%":          0.25,
-    "Brl/BIP%":     0.25,
-    "SLG":          0.20,
-    "SweetSpot%":   0.10,
-    "Park factor":  0.10,
-    "Pitcher HR/9": 0.10,
+    "HH%":          0.20,   # hard hit rate
+    "Brl/BIP%":     0.20,   # barrel rate
+    "SLG":          0.15,   # power production
+    "Avg EV":       0.15,   # exit velocity
+    "Avg LA":       0.10,   # launch angle (higher = more fly balls)
+    "FB%":          0.10,   # fly ball rate
+    "SweetSpot%":   0.05,   # sweet spot contact
+    "Park factor":  0.05,   # venue boost
+    "Pitcher HR/9": 0.10,   # matchup vulnerability
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -327,12 +330,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• HH% — 25%")
-    st.caption("• Brl/BIP% — 25%")
-    st.caption("• SLG — 20%")
-    st.caption("• SweetSpot% — 10%")
-    st.caption("• Park factor — 10%")
+    st.caption("• HH% — 20%")
+    st.caption("• Brl/BIP% — 20%")
+    st.caption("• SLG — 15%")
+    st.caption("• Avg EV — 15%")
+    st.caption("• Avg LA — 10%")
+    st.caption("• FB% — 10%")
     st.caption("• Pitcher HR/9 — 10%")
+    st.caption("• SweetSpot% — 5%")
+    st.caption("• Park factor — 5%")
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
