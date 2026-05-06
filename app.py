@@ -320,13 +320,11 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "Avg EV":       0.30,
-    "Brl/BIP%":     0.20,
+    "Avg EV":       0.55,
     "HH%":          0.15,
     "Avg LA":       0.10,
     "FB%":          0.10,
     "Pitcher HR/9": 0.05,
-    "SweetSpot%":   0.05,
     "Park factor":  0.05,
 }
 
@@ -431,13 +429,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV — 30%")
-    st.caption("• Brl/BIP% — 20%")
+    st.caption("• Avg EV — 55%")
     st.caption("• HH% — 15%")
     st.caption("• Avg LA — 10%")
     st.caption("• FB% — 10%")
     st.caption("• Pitcher HR/9 — 5%")
-    st.caption("• SweetSpot% — 5%")
     st.caption("• Park factor — 5%")
     st.markdown("---")
     st.markdown("**Data sources**")
