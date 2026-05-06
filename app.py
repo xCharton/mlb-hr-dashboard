@@ -676,7 +676,7 @@ with col_a:
         top15, x="Matchup score", y="Player", orientation="h",
         color="Matchup score", color_continuous_scale="RdYlGn",
         range_color=[0, 100],
-        hover_data=["Batting team", "Opp pitcher", "HR", "HH%", "Brl/BIP%"],
+        hover_data=["Batting team", "Opp pitcher", "HR", "HH%"],
         text="Opp pitcher",
     )
     fig.update_traces(textposition="inside", textfont_size=9)
@@ -688,23 +688,23 @@ with col_a:
     st.plotly_chart(fig, use_container_width=True)
 
 with col_b:
-    st.markdown("**Brl/BIP% vs HH% — today's batters**")
+    st.markdown("**Avg EV vs HH% — today's batters (last 3 games)**")
     plot_df = chart_df.head(60)
-    hh_ok  = "HH%"      in plot_df.columns and plot_df["HH%"].notna().any()
-    brl_ok = "Brl/BIP%" in plot_df.columns and plot_df["Brl/BIP%"].notna().any()
-    if hh_ok and brl_ok:
+    hh_ok = "HH%"           in plot_df.columns and plot_df["HH%"].notna().any()
+    ev_ok = "Avg EV (L3G)"  in plot_df.columns and plot_df["Avg EV (L3G)"].notna().any()
+    if hh_ok and ev_ok:
         fig2 = px.scatter(
-            plot_df, x="HH%", y="Brl/BIP%", text="Player",
+            plot_df, x="HH%", y="Avg EV (L3G)", text="Player",
             color="Matchup score", color_continuous_scale="RdYlGn",
             range_color=[0, 100],
             size="HR",
-            hover_data=["Batting team", "Opp pitcher", "SLG", "Avg EV", "SweetSpot%"],
+            hover_data=["Batting team", "Opp pitcher", "SLG", "Avg LA (L3G)", "FB% (L3G)"],
         )
         fig2.update_traces(textposition="top center", textfont_size=9)
         fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=440)
         st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("Statcast data unavailable from Savant today.")
+        st.info("EV data unavailable — chart will appear once last 3 games data loads.")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
