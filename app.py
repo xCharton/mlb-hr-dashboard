@@ -189,8 +189,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_angle":         "Avg LA",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-    }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    }    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
@@ -286,13 +285,15 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     df["Brl/BIP%"] = pd.to_numeric(df["Brl/BIP%"], errors="coerce")
     return df.dropna(subset=["Player"])
 
-# ── Last 3 games EV, LA, FB% from MLB game log API ───────────────────────────
+# ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
+# Note: MLB Stats API game logs do not include exit velocity or launch angle.
+# Those are Statcast-only fields. EV and LA come from fetch_savant_main (season).
+# FB% is computed from airOuts/atBats in the last 3 game logs (reliable).
 @st.cache_data(ttl=1800)
-def fetch_last3_ev(team_id: int, season: int) -> pd.DataFrame:
+def fetch_last3_fb(team_id: int, season: int) -> pd.DataFrame:
     """
-    Pulls each player's game log for the season, takes last 3 games,
-    aggregates avg exit velocity, avg launch angle, and fly ball rate.
-    MLB API returns per-game hitting stats including batted ball data.
+    Pulls game log for a team, takes each player's last 3 games,
+    computes FB% = airOuts (fly balls) / atBats * 100.
     """
     url = (
         f"https://statsapi.mlb.com/api/v1/stats"
@@ -321,38 +322,14 @@ def fetch_last3_ev(team_id: int, season: int) -> pd.DataFrame:
         games = data["games"][-3:]
         if not games:
             continue
-
-        # Exit velocity and launch angle from game log
-        ev_vals, la_vals = [], []
-        fly_balls, total_batted = 0, 0
-
-        for g in games:
-            ev = g.get("avgExitVelocity") or g.get("launchSpeed")
-            la = g.get("avgLaunchAngle") or g.get("launchAngle")
-            fb = int(g.get("flyOuts", 0) or g.get("airOuts", 0) or 0)
-            ab = int(g.get("atBats", 0) or 0)
-
-            if ev is not None:
-                try: ev_vals.append(float(ev))
-                except (ValueError, TypeError): pass
-            if la is not None:
-                try: la_vals.append(float(la))
-                except (ValueError, TypeError): pass
-            fly_balls    += fb
-            total_batted += ab
-
-        avg_ev = round(sum(ev_vals) / len(ev_vals), 1) if ev_vals else None
-        avg_la = round(sum(la_vals) / len(la_vals), 1) if la_vals else None
+        fly_balls    = sum(int(g.get("airOuts", 0) or 0) for g in games)
+        total_batted = sum(int(g.get("atBats",  0) or 0) for g in games)
         fb_pct = round(fly_balls / total_batted * 100, 1) if total_batted > 0 else None
-
         rows.append({
-            "player_id":    pid,
-            "Player":       data["name"],
-            "Avg EV (L3G)": avg_ev,
-            "Avg LA (L3G)": avg_la,
-            "FB% (L3G)":    fb_pct,
+            "player_id":  pid,
+            "Player":     data["name"],
+            "FB% (L3G)":  fb_pct,
         })
-
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
@@ -499,9 +476,9 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV (last 3 games) — 55%")
-    st.caption("• HH% — 15%")
-    st.caption("• Avg LA (last 3 games) — 10%")
+    st.caption("• Avg EV (season) — 55%")
+    st.caption("• HH% (season) — 15%")
+    st.caption("• Avg LA (season) — 10%")
     st.caption("• FB% (last 3 games) — 10%")
     st.caption("• Pitcher HR/9 — 5%")
     st.caption("• Park factor — 5%")
@@ -550,30 +527,34 @@ for g in games:
     if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
     if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
 
-with st.spinner("Loading last 3 games exit velocity data..."):
+with st.spinner("Loading last 3 games fly ball data..."):
     l3g_frames = []
     for tid, _ in team_ids:
-        df_t = fetch_last3_ev(tid, season)
+        df_t = fetch_last3_fb(tid, season)
         if not df_t.empty:
             l3g_frames.append(df_t)
 
 if l3g_frames:
     l3g_df = pd.concat(l3g_frames).drop_duplicates(subset=["player_id"]).reset_index(drop=True)
-    # Merge by player_id for accuracy (avoids name mismatches)
     if "player_id" in hitting_df.columns:
         hitting_df = hitting_df.merge(
-            l3g_df[["player_id", "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)"]],
+            l3g_df[["player_id", "FB% (L3G)"]],
             on="player_id", how="left"
         )
     else:
         hitting_df = hitting_df.merge(
-            l3g_df[["Player", "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)"]],
+            l3g_df[["Player", "FB% (L3G)"]],
             on="Player", how="left"
         )
 else:
-    hitting_df["Avg EV (L3G)"] = None
-    hitting_df["Avg LA (L3G)"] = None
-    hitting_df["FB% (L3G)"]    = None
+    hitting_df["FB% (L3G)"] = None
+
+# EV and LA come from Savant season leaderboard — rename to L3G labels for display
+# (season averages are the best available proxy since game log has no EV/LA)
+if "Avg EV" in hitting_df.columns:
+    hitting_df["Avg EV (L3G)"] = hitting_df["Avg EV"]
+if "Avg LA" in hitting_df.columns:
+    hitting_df["Avg LA (L3G)"] = hitting_df["Avg LA"]
 
 # Status banner
 failed = []
