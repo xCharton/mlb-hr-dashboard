@@ -188,8 +188,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_speed":         "Avg EV",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-    }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    }    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
@@ -331,6 +330,72 @@ def fetch_last3_fb(team_id: int, season: int) -> pd.DataFrame:
             "FB% (L3G)":  fb_pct,
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+# ── Last 3 games EV from Savant Statcast search ───────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
+    """
+    Gets last 3 completed game dates for a team, then pulls individual
+    Statcast batted ball events from Savant and averages EV per player.
+    """
+    sched_url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&teamId={team_id}&season={season}"
+        f"&gameType=R&fields=dates,date,games,status,abstractGameState"
+    )
+    try:
+        r = requests.get(sched_url, timeout=10)
+        r.raise_for_status()
+        dates_data = r.json().get("dates", [])
+    except Exception:
+        return pd.DataFrame()
+
+    played = sorted(
+        [d["date"] for d in dates_data
+         if any(g.get("status", {}).get("abstractGameState") == "Final"
+                for g in d.get("games", []))],
+        reverse=True
+    )[:3]
+
+    if not played:
+        return pd.DataFrame()
+
+    start_date = played[-1]
+    end_date   = played[0]
+
+    url = (
+        f"https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&hfGT=R%7C&hfSea={season}%7C&player_type=batter"
+        f"&game_date_gt={start_date}&game_date_lt={end_date}"
+        f"&team={team_id}&min_results=0&type=details&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty or "launch_speed" not in df.columns:
+        return pd.DataFrame()
+
+    name_col = next(
+        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
+        None
+    )
+    if not name_col:
+        return pd.DataFrame()
+
+    df["Player"] = df[name_col].apply(
+        lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+    )
+    df["launch_speed"] = pd.to_numeric(df["launch_speed"], errors="coerce")
+
+    return (
+        df.groupby("Player")["launch_speed"]
+        .mean().round(1).reset_index()
+        .rename(columns={"launch_speed": "Avg EV (L3G)"})
+    )
 
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
@@ -552,84 +617,7 @@ if l3g_ev_frames:
 else:
     hitting_df["Avg EV (L3G)"] = None
 
-# EV last 3 games — fetch from Savant Statcast search by date range
-# We get the last 3 game dates from the schedule and pull batted ball data
-@st.cache_data(ttl=1800)
-def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
-    """
-    Fetches individual Statcast batted ball events for a team's last 3 games
-    from Baseball Savant, then averages EV per player.
-    """
-    # First get last 3 game dates for this team from MLB schedule
-    sched_url = (
-        f"https://statsapi.mlb.com/api/v1/schedule"
-        f"?sportId=1&teamId={team_id}&season={season}"
-        f"&gameType=R&fields=dates,date,games,status,abstractGameState"
-    )
-    try:
-        r = requests.get(sched_url, timeout=10)
-        r.raise_for_status()
-        dates_data = r.json().get("dates", [])
-    except Exception:
-        return pd.DataFrame()
 
-    # Get last 3 completed game dates
-    played = sorted(
-        [d["date"] for d in dates_data
-         if any(g.get("status", {}).get("abstractGameState") == "Final"
-                for g in d.get("games", []))],
-        reverse=True
-    )[:3]
-
-    if not played:
-        return pd.DataFrame()
-
-    start_date = played[-1]   # earliest of last 3
-    end_date   = played[0]    # most recent
-
-    # Pull Statcast batted ball CSV for this team over those dates
-    url = (
-        f"https://baseballsavant.mlb.com/statcast_search/csv"
-        f"?all=true&hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&stadium=&hfBBL=&hfNewZones="
-        f"&hfPull=&hfC=&hfSea={season}%7C&hfSit=&player_type=batter"
-        f"&hfOuts=&opponent=&pitcher_throws=&batter_stands=&hfSA=&game_date_gt={start_date}"
-        f"&game_date_lt={end_date}&hfInfield=&team={team_id}&position=&hfOutfield="
-        f"&hfRO=&home_road=&hfFlag=&hfBBT=&metric_1=&hfInn=&min_pitches=0"
-        f"&min_results=0&group_by=name&sort_col=pitches&player_event_sort=api_p_release_speed"
-        f"&sort_order=desc&min_abs=0&type=details&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or "launch_speed" not in df.columns:
-        return pd.DataFrame()
-
-    # Player name from Savant — batter_name or player_name column
-    name_col = next(
-        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
-        None
-    )
-    if not name_col:
-        return pd.DataFrame()
-
-    df["Player"] = df[name_col].apply(
-        lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
-    )
-    df["launch_speed"] = pd.to_numeric(df["launch_speed"], errors="coerce")
-
-    # Average EV per player across all batted ball events in last 3 games
-    result = (
-        df.groupby("Player")["launch_speed"]
-        .mean()
-        .round(1)
-        .reset_index()
-        .rename(columns={"launch_speed": "Avg EV (L3G)"})
-    )
-    return result
 
 # Status banner
 failed = []
