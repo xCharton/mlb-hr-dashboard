@@ -186,11 +186,9 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
 
     rename = {
         "avg_hit_speed":         "Avg EV",
-        "avg_hit_angle":         "Avg LA",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-    }  
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    }    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
@@ -367,9 +365,8 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "Avg EV (L3G)": 0.55,
+    "Avg EV (L3G)": 0.65,
     "HH%":          0.15,
-    "Avg LA (L3G)": 0.10,
     "FB% (L3G)":    0.10,
     "Pitcher HR/9": 0.05,
     "Park factor":  0.05,
@@ -393,7 +390,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%"]
+STATCAST_COLS = ["HH%", "Avg EV", "FB%"]
 
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
@@ -412,18 +409,17 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
     rows = []
     for _, b in batters.iterrows():
         row = {
-            "Player":         b["Player"],
-            "Batting team":   batting_team,
-            "Opp pitcher":    opp_pitcher,
-            "HR":             b["HR"],
-            "AB":             b["AB"],
-            "SLG":            b["SLG"],
-            "Park factor":    park_factor,
-            "Pitcher HR/9":   opp_hr9,
-            "HH%":            b.get("HH%", None),
-            "Avg EV (L3G)":   b.get("Avg EV (L3G)", None),
-            "Avg LA (L3G)":   b.get("Avg LA (L3G)", None),
-            "FB% (L3G)":      b.get("FB% (L3G)", None),
+            "Player":        b["Player"],
+            "Batting team":  batting_team,
+            "Opp pitcher":   opp_pitcher,
+            "HR":            b["HR"],
+            "AB":            b["AB"],
+            "SLG":           b["SLG"],
+            "Park factor":   park_factor,
+            "Pitcher HR/9":  opp_hr9,
+            "HH%":           b.get("HH%", None),
+            "Avg EV (L3G)":  b.get("Avg EV (L3G)", None),
+            "FB% (L3G)":     b.get("FB% (L3G)", None),
         }
         rows.append(row)
     return rows
@@ -433,7 +429,7 @@ DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "HH%",
-    "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
+    "Avg EV (L3G)", "FB% (L3G)",
     "SLG",
     "Park factor", "Pitcher HR/9",
     "Matchup score",
@@ -446,7 +442,6 @@ def style_table(df: pd.DataFrame, cols: list):
     fmt = {
         "HH%":           "{:.1f}%",
         "Avg EV (L3G)":  "{:.1f}",
-        "Avg LA (L3G)":  "{:.1f}°",
         "FB% (L3G)":     "{:.1f}%",
         "SLG":           "{:.3f}",
         "Park factor":   "{:.2f}",
@@ -477,9 +472,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV (season) — 55%")
+    st.caption("• Avg EV (last 3 games) — 65%")
     st.caption("• HH% (season) — 15%")
-    st.caption("• Avg LA (season) — 10%")
     st.caption("• FB% (last 3 games) — 10%")
     st.caption("• Pitcher HR/9 — 5%")
     st.caption("• Park factor — 5%")
@@ -528,34 +522,113 @@ for g in games:
     if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
     if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
 
-with st.spinner("Loading last 3 games fly ball data..."):
-    l3g_frames = []
+with st.spinner("Loading last 3 games fly ball and exit velocity data..."):
+    l3g_fb_frames = []
+    l3g_ev_frames = []
     for tid, _ in team_ids:
-        df_t = fetch_last3_fb(tid, season)
-        if not df_t.empty:
-            l3g_frames.append(df_t)
+        df_fb = fetch_last3_fb(tid, season)
+        if not df_fb.empty:
+            l3g_fb_frames.append(df_fb)
+        df_ev = fetch_last3_ev_savant(tid, season)
+        if not df_ev.empty:
+            l3g_ev_frames.append(df_ev)
 
-if l3g_frames:
-    l3g_df = pd.concat(l3g_frames).drop_duplicates(subset=["player_id"]).reset_index(drop=True)
-    if "player_id" in hitting_df.columns:
-        hitting_df = hitting_df.merge(
-            l3g_df[["player_id", "FB% (L3G)"]],
-            on="player_id", how="left"
-        )
-    else:
-        hitting_df = hitting_df.merge(
-            l3g_df[["Player", "FB% (L3G)"]],
-            on="Player", how="left"
-        )
+# Merge FB% (L3G)
+if l3g_fb_frames:
+    l3g_fb = pd.concat(l3g_fb_frames).drop_duplicates(subset=["player_id"]).reset_index(drop=True)
+    merge_col = "player_id" if "player_id" in hitting_df.columns else "Player"
+    hitting_df = hitting_df.merge(
+        l3g_fb[[merge_col, "FB% (L3G)"]],
+        on=merge_col, how="left"
+    )
 else:
     hitting_df["FB% (L3G)"] = None
 
-# EV and LA come from Savant season leaderboard — rename to L3G labels for display
-# (season averages are the best available proxy since game log has no EV/LA)
-if "Avg EV" in hitting_df.columns:
-    hitting_df["Avg EV (L3G)"] = hitting_df["Avg EV"]
-if "Avg LA" in hitting_df.columns:
-    hitting_df["Avg LA (L3G)"] = hitting_df["Avg LA"]
+# Merge Avg EV (L3G) — by Player name from Savant
+if l3g_ev_frames:
+    l3g_ev = pd.concat(l3g_ev_frames).groupby("Player")["Avg EV (L3G)"].mean().round(1).reset_index()
+    hitting_df = hitting_df.merge(l3g_ev, on="Player", how="left")
+else:
+    hitting_df["Avg EV (L3G)"] = None
+
+# EV last 3 games — fetch from Savant Statcast search by date range
+# We get the last 3 game dates from the schedule and pull batted ball data
+@st.cache_data(ttl=1800)
+def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
+    """
+    Fetches individual Statcast batted ball events for a team's last 3 games
+    from Baseball Savant, then averages EV per player.
+    """
+    # First get last 3 game dates for this team from MLB schedule
+    sched_url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&teamId={team_id}&season={season}"
+        f"&gameType=R&fields=dates,date,games,status,abstractGameState"
+    )
+    try:
+        r = requests.get(sched_url, timeout=10)
+        r.raise_for_status()
+        dates_data = r.json().get("dates", [])
+    except Exception:
+        return pd.DataFrame()
+
+    # Get last 3 completed game dates
+    played = sorted(
+        [d["date"] for d in dates_data
+         if any(g.get("status", {}).get("abstractGameState") == "Final"
+                for g in d.get("games", []))],
+        reverse=True
+    )[:3]
+
+    if not played:
+        return pd.DataFrame()
+
+    start_date = played[-1]   # earliest of last 3
+    end_date   = played[0]    # most recent
+
+    # Pull Statcast batted ball CSV for this team over those dates
+    url = (
+        f"https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&stadium=&hfBBL=&hfNewZones="
+        f"&hfPull=&hfC=&hfSea={season}%7C&hfSit=&player_type=batter"
+        f"&hfOuts=&opponent=&pitcher_throws=&batter_stands=&hfSA=&game_date_gt={start_date}"
+        f"&game_date_lt={end_date}&hfInfield=&team={team_id}&position=&hfOutfield="
+        f"&hfRO=&home_road=&hfFlag=&hfBBT=&metric_1=&hfInn=&min_pitches=0"
+        f"&min_results=0&group_by=name&sort_col=pitches&player_event_sort=api_p_release_speed"
+        f"&sort_order=desc&min_abs=0&type=details&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty or "launch_speed" not in df.columns:
+        return pd.DataFrame()
+
+    # Player name from Savant — batter_name or player_name column
+    name_col = next(
+        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
+        None
+    )
+    if not name_col:
+        return pd.DataFrame()
+
+    df["Player"] = df[name_col].apply(
+        lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
+    )
+    df["launch_speed"] = pd.to_numeric(df["launch_speed"], errors="coerce")
+
+    # Average EV per player across all batted ball events in last 3 games
+    result = (
+        df.groupby("Player")["launch_speed"]
+        .mean()
+        .round(1)
+        .reset_index()
+        .rename(columns={"launch_speed": "Avg EV (L3G)"})
+    )
+    return result
 
 # Status banner
 failed = []
@@ -670,17 +743,17 @@ with col_a:
     st.plotly_chart(fig, use_container_width=True)
 
 with col_b:
-    st.markdown("**Avg EV vs HH% — today's batters (last 3 games)**")
+    st.markdown("**Avg EV vs HH% — last 3 games**")
     plot_df = chart_df.head(60)
-    hh_ok = "HH%"           in plot_df.columns and plot_df["HH%"].notna().any()
-    ev_ok = "Avg EV (L3G)"  in plot_df.columns and plot_df["Avg EV (L3G)"].notna().any()
+    hh_ok = "HH%"          in plot_df.columns and plot_df["HH%"].notna().any()
+    ev_ok = "Avg EV (L3G)" in plot_df.columns and plot_df["Avg EV (L3G)"].notna().any()
     if hh_ok and ev_ok:
         fig2 = px.scatter(
             plot_df, x="HH%", y="Avg EV (L3G)", text="Player",
             color="Matchup score", color_continuous_scale="RdYlGn",
             range_color=[0, 100],
             size="HR",
-            hover_data=["Batting team", "Opp pitcher", "SLG", "Avg LA (L3G)", "FB% (L3G)"],
+            hover_data=["Batting team", "Opp pitcher", "SLG", "FB% (L3G)"],
         )
         fig2.update_traces(textposition="top center", textfont_size=9)
         fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=440)
