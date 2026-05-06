@@ -286,6 +286,75 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     df["Brl/BIP%"] = pd.to_numeric(df["Brl/BIP%"], errors="coerce")
     return df.dropna(subset=["Player"])
 
+# ── Last 3 games EV, LA, FB% from MLB game log API ───────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_last3_ev(team_id: int, season: int) -> pd.DataFrame:
+    """
+    Pulls each player's game log for the season, takes last 3 games,
+    aggregates avg exit velocity, avg launch angle, and fly ball rate.
+    MLB API returns per-game hitting stats including batted ball data.
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/stats"
+        f"?stats=gameLog&group=hitting&gameType=R"
+        f"&season={season}&teamId={team_id}&limit=9999"
+    )
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        splits = r.json()["stats"][0]["splits"]
+    except Exception:
+        return pd.DataFrame()
+
+    player_games: dict = {}
+    for s in splits:
+        stat   = s.get("stat", {})
+        player = s.get("player", {})
+        pid    = player.get("id")
+        name   = player.get("fullName", "Unknown")
+        if pid not in player_games:
+            player_games[pid] = {"name": name, "games": []}
+        player_games[pid]["games"].append(stat)
+
+    rows = []
+    for pid, data in player_games.items():
+        games = data["games"][-3:]
+        if not games:
+            continue
+
+        # Exit velocity and launch angle from game log
+        ev_vals, la_vals = [], []
+        fly_balls, total_batted = 0, 0
+
+        for g in games:
+            ev = g.get("avgExitVelocity") or g.get("launchSpeed")
+            la = g.get("avgLaunchAngle") or g.get("launchAngle")
+            fb = int(g.get("flyOuts", 0) or g.get("airOuts", 0) or 0)
+            ab = int(g.get("atBats", 0) or 0)
+
+            if ev is not None:
+                try: ev_vals.append(float(ev))
+                except (ValueError, TypeError): pass
+            if la is not None:
+                try: la_vals.append(float(la))
+                except (ValueError, TypeError): pass
+            fly_balls    += fb
+            total_batted += ab
+
+        avg_ev = round(sum(ev_vals) / len(ev_vals), 1) if ev_vals else None
+        avg_la = round(sum(la_vals) / len(la_vals), 1) if la_vals else None
+        fb_pct = round(fly_balls / total_batted * 100, 1) if total_batted > 0 else None
+
+        rows.append({
+            "player_id":    pid,
+            "Player":       data["name"],
+            "Avg EV (L3G)": avg_ev,
+            "Avg LA (L3G)": avg_la,
+            "FB% (L3G)":    fb_pct,
+        })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_pitcher_stats(season: int) -> pd.DataFrame:
@@ -320,10 +389,10 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "Avg EV":       0.55,
+    "Avg EV (L3G)": 0.55,
     "HH%":          0.15,
-    "Avg LA":       0.10,
-    "FB%":          0.10,
+    "Avg LA (L3G)": 0.10,
+    "FB% (L3G)":    0.10,
     "Pitcher HR/9": 0.05,
     "Park factor":  0.05,
 }
@@ -346,7 +415,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%"]
+STATCAST_COLS = ["HH%", "Avg EV", "Avg LA", "FB%"]
 
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
@@ -365,17 +434,19 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
     rows = []
     for _, b in batters.iterrows():
         row = {
-            "Player":       b["Player"],
-            "Batting team": batting_team,
-            "Opp pitcher":  opp_pitcher,
-            "HR":           b["HR"],
-            "AB":           b["AB"],
-            "SLG":          b["SLG"],
-            "Park factor":  park_factor,
-            "Pitcher HR/9": opp_hr9,
+            "Player":         b["Player"],
+            "Batting team":   batting_team,
+            "Opp pitcher":    opp_pitcher,
+            "HR":             b["HR"],
+            "AB":             b["AB"],
+            "SLG":            b["SLG"],
+            "Park factor":    park_factor,
+            "Pitcher HR/9":   opp_hr9,
+            "HH%":            b.get("HH%", None),
+            "Avg EV (L3G)":   b.get("Avg EV (L3G)", None),
+            "Avg LA (L3G)":   b.get("Avg LA (L3G)", None),
+            "FB% (L3G)":      b.get("FB% (L3G)", None),
         }
-        for col in STATCAST_COLS:
-            row[col] = b.get(col, None)
         rows.append(row)
     return rows
 
@@ -383,23 +454,22 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
 DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
-    "HH%", "Avg EV", "Avg LA", "FB%", "SweetSpot%", "Brl/BIP%",
+    "HH%",
+    "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
     "SLG",
     "Park factor", "Pitcher HR/9",
     "Matchup score",
 ]
 
-HIGH_GOOD = ["HH%", "Avg EV", "FB%", "SweetSpot%", "Brl/BIP%",
+HIGH_GOOD = ["HH%", "Avg EV (L3G)", "FB% (L3G)",
              "SLG", "Park factor", "Pitcher HR/9", "Matchup score"]
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
         "HH%":           "{:.1f}%",
-        "Avg EV":        "{:.1f}",
-        "Avg LA":        "{:.1f}°",
-        "FB%":           "{:.1f}%",
-        "SweetSpot%":    "{:.1f}%",
-        "Brl/BIP%":      "{:.1f}%",
+        "Avg EV (L3G)":  "{:.1f}",
+        "Avg LA (L3G)":  "{:.1f}°",
+        "FB% (L3G)":     "{:.1f}%",
         "SLG":           "{:.3f}",
         "Park factor":   "{:.2f}",
         "Pitcher HR/9":  "{:.2f}",
@@ -429,10 +499,10 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV — 55%")
+    st.caption("• Avg EV (last 3 games) — 55%")
     st.caption("• HH% — 15%")
-    st.caption("• Avg LA — 10%")
-    st.caption("• FB% — 10%")
+    st.caption("• Avg LA (last 3 games) — 10%")
+    st.caption("• FB% (last 3 games) — 10%")
     st.caption("• Pitcher HR/9 — 5%")
     st.caption("• Park factor — 5%")
     st.markdown("---")
@@ -465,7 +535,7 @@ if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
 
-# ── Merge Statcast (always full-season — Savant doesn't do recent splits) ─────
+# ── Merge full-season Statcast ─────────────────────────────────────────────────
 for src in [sc_main, sc_barrels, sc_fb]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
@@ -474,10 +544,40 @@ for col in STATCAST_COLS:
     if col not in hitting_df.columns:
         hitting_df[col] = None
 
+# ── Fetch and merge last 3 games EV/LA/FB% per team ──────────────────────────
+team_ids = set()
+for g in games:
+    if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
+    if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
+
+with st.spinner("Loading last 3 games exit velocity data..."):
+    l3g_frames = []
+    for tid, _ in team_ids:
+        df_t = fetch_last3_ev(tid, season)
+        if not df_t.empty:
+            l3g_frames.append(df_t)
+
+if l3g_frames:
+    l3g_df = pd.concat(l3g_frames).drop_duplicates(subset=["player_id"]).reset_index(drop=True)
+    # Merge by player_id for accuracy (avoids name mismatches)
+    if "player_id" in hitting_df.columns:
+        hitting_df = hitting_df.merge(
+            l3g_df[["player_id", "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)"]],
+            on="player_id", how="left"
+        )
+    else:
+        hitting_df = hitting_df.merge(
+            l3g_df[["Player", "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)"]],
+            on="Player", how="left"
+        )
+else:
+    hitting_df["Avg EV (L3G)"] = None
+    hitting_df["Avg LA (L3G)"] = None
+    hitting_df["FB% (L3G)"]    = None
+
 # Status banner
 failed = []
-if sc_main.empty:    failed.append("EV / HH% / LA / FB% / SweetSpot%")
-if sc_barrels.empty: failed.append("Brl/BIP%")
+if sc_main.empty: failed.append("HH%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
 
