@@ -326,9 +326,8 @@ def fetch_last3_fb(team_id: int, season: int) -> pd.DataFrame:
         total_batted = sum(int(g.get("atBats",  0) or 0) for g in games)
         fb_pct = round(fly_balls / total_batted * 100, 1) if total_batted > 0 else None
         rows.append({
-            "player_id":  pid,
-            "Player":     data["name"],
-            "FB% (L3G)":  fb_pct,
+            "Player":    data["name"],
+            "FB% (L3G)": fb_pct,
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -600,14 +599,14 @@ with st.spinner("Loading last 3 games fly ball and exit velocity data..."):
         if not df_ev.empty:
             l3g_ev_frames.append(df_ev)
 
-# Merge FB% (L3G)
+# Merge FB% (L3G) — by Player name
 if l3g_fb_frames:
-    l3g_fb = pd.concat(l3g_fb_frames).drop_duplicates(subset=["player_id"]).reset_index(drop=True)
-    merge_col = "player_id" if "player_id" in hitting_df.columns else "Player"
-    hitting_df = hitting_df.merge(
-        l3g_fb[[merge_col, "FB% (L3G)"]],
-        on=merge_col, how="left"
+    l3g_fb = (
+        pd.concat(l3g_fb_frames)
+        .drop_duplicates(subset=["Player"])
+        .reset_index(drop=True)
     )
+    hitting_df = hitting_df.merge(l3g_fb[["Player", "FB% (L3G)"]], on="Player", how="left")
 else:
     hitting_df["FB% (L3G)"] = None
 
