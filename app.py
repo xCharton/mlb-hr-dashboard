@@ -213,6 +213,7 @@ def fetch_savant_fb(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
+        st.info(f"FB columns: {list(df.columns[:20])}")
     except Exception:
         return pd.DataFrame()
 
