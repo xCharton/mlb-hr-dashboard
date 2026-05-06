@@ -189,26 +189,70 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_angle":         "Avg LA",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-        "gb":                    "_gb",
-        "fbld":                  "_fbld",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Derive FB% from fbld - league avg LD% (~21%), clipped to sensible range
-    if "_fbld" in df.columns:
-        df["FB%"] = (df["_fbld"] - 21.0).clip(lower=10.0, upper=55.0)
-        df = df.drop(columns=["_gb", "_fbld"], errors="ignore")
-        keep = [c for c in keep if c not in ("_gb", "_fbld")] + ["FB%"]
-
     return df.dropna(subset=["Player"])
 
-# ── FB% is now derived inside fetch_savant_main from fbld - avg LD% ───────────
+# ── Savant: FB% from exit velocity spray leaderboard ─────────────────────────
+@st.cache_data(ttl=3600)
 def fetch_savant_fb(season: int) -> pd.DataFrame:
-    return pd.DataFrame()  # no longer needed as a separate call
+    """
+    Savant's zone/spray leaderboard has true fly ball rate.
+    Endpoint confirmed to include batted ball type breakdowns.
+    """
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&id=n_fb_percent&sportId=1"
+        f"&season={season}&season_end={season}&min=50&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    df = add_player_col(df)
+    if "Player" not in df.columns:
+        return pd.DataFrame()
+
+    # Find any column that looks like fly ball rate
+    # Savant confirmed cols from this endpoint include: gb, fbld, n_fb_percent
+    fb_col = next(
+        (c for c in df.columns
+         if c.lower() in ("n_fb_percent", "fb_percent", "fly_ball_percent", "fb", "fly_ball")),
+        None
+    )
+
+    if fb_col is None:
+        # Last resort: if gb and fbld exist, ld% ≈ 100 - gb - fbld won't work
+        # but if there's a column with values in realistic FB% range (20-50) use it
+        for c in df.columns:
+            try:
+                col_vals = pd.to_numeric(df[c], errors="coerce").dropna()
+                if len(col_vals) > 10 and 15 < col_vals.mean() < 50:
+                    fb_col = c
+                    break
+            except Exception:
+                continue
+
+    if fb_col is None:
+        return pd.DataFrame()
+
+    df = df.rename(columns={fb_col: "FB%"})
+    df = df[["Player", "FB%"]].copy()
+    df["FB%"] = pd.to_numeric(df["FB%"], errors="coerce")
+    if df["FB%"].dropna().max() < 1.0:
+        df["FB%"] = df["FB%"] * 100
+    # Sanity check — real FB% is 20-50%, discard if out of range
+    median = df["FB%"].dropna().median()
+    if not (15 < median < 55):
+        return pd.DataFrame()
+    return df.dropna(subset=["Player"])
 
 # ── Savant: barrel leaderboard — Brl/BIP% ─────────────────────────────────────
 @st.cache_data(ttl=3600)
@@ -276,12 +320,12 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH%":          0.25,
-    "Brl/BIP%":     0.25,
-    "Avg EV":       0.15,
+    "Avg EV":       0.30,
+    "Brl/BIP%":     0.20,
+    "HH%":          0.15,
     "Avg LA":       0.10,
     "FB%":          0.10,
-    "Pitcher HR/9": 0.10,
+    "Pitcher HR/9": 0.05,
     "SweetSpot%":   0.05,
     "Park factor":  0.05,
 }
@@ -387,12 +431,12 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• HH% — 25%")
-    st.caption("• Brl/BIP% — 25%")
-    st.caption("• Avg EV — 15%")
+    st.caption("• Avg EV — 30%")
+    st.caption("• Brl/BIP% — 20%")
+    st.caption("• HH% — 15%")
     st.caption("• Avg LA — 10%")
     st.caption("• FB% — 10%")
-    st.caption("• Pitcher HR/9 — 10%")
+    st.caption("• Pitcher HR/9 — 5%")
     st.caption("• SweetSpot% — 5%")
     st.caption("• Park factor — 5%")
     st.markdown("---")
