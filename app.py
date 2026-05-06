@@ -287,48 +287,56 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
 
 # ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
 # Note: MLB Stats API game logs do not include exit velocity or launch angle.
-# Those are Statcast-only fields. EV and LA come from fetch_savant_main (season).
-# FB% is computed from airOuts/atBats in the last 3 game logs (reliable).
+# FB% is computed from airOuts/atBats from each player's individual game log.
 @st.cache_data(ttl=1800)
 def fetch_last3_fb(team_id: int, season: int) -> pd.DataFrame:
     """
-    Pulls game log for a team, takes each player's last 3 games,
-    computes FB% = airOuts (fly balls) / atBats * 100.
+    1. Gets active roster for the team
+    2. For each player, fetches their game log and takes last 3 games
+    3. Computes FB% = airOuts / atBats * 100
     """
-    url = (
-        f"https://statsapi.mlb.com/api/v1/stats"
-        f"?stats=gameLog&group=hitting&gameType=R"
-        f"&season={season}&teamId={team_id}&limit=9999"
+    # Step 1 — get roster
+    roster_url = (
+        f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
+        f"?rosterType=active&season={season}"
     )
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(roster_url, timeout=10)
         r.raise_for_status()
-        splits = r.json()["stats"][0]["splits"]
+        players = r.json().get("roster", [])
     except Exception:
         return pd.DataFrame()
 
-    player_games: dict = {}
-    for s in splits:
-        stat   = s.get("stat", {})
-        player = s.get("player", {})
-        pid    = player.get("id")
-        name   = player.get("fullName", "Unknown")
-        if pid not in player_games:
-            player_games[pid] = {"name": name, "games": []}
-        player_games[pid]["games"].append(stat)
-
     rows = []
-    for pid, data in player_games.items():
-        games = data["games"][-3:]
-        if not games:
+    for p in players:
+        pid  = p.get("person", {}).get("id")
+        name = p.get("person", {}).get("fullName", "Unknown")
+        if not pid:
             continue
-        fly_balls    = sum(int(g.get("airOuts", 0) or 0) for g in games)
-        total_batted = sum(int(g.get("atBats",  0) or 0) for g in games)
+
+        # Step 2 — get this player's game log
+        log_url = (
+            f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
+            f"?stats=gameLog&group=hitting&gameType=R&season={season}"
+        )
+        try:
+            r2 = requests.get(log_url, timeout=10)
+            r2.raise_for_status()
+            splits = r2.json()["stats"][0]["splits"]
+        except Exception:
+            continue
+
+        if not splits:
+            continue
+
+        # Step 3 — last 3 games
+        last3 = splits[-3:]
+        fly_balls    = sum(int(s.get("stat", {}).get("airOuts", 0) or 0) for s in last3)
+        total_batted = sum(int(s.get("stat", {}).get("atBats",  0) or 0) for s in last3)
         fb_pct = round(fly_balls / total_batted * 100, 1) if total_batted > 0 else None
-        rows.append({
-            "Player":    data["name"],
-            "FB% (L3G)": fb_pct,
-        })
+
+        rows.append({"Player": name, "FB% (L3G)": fb_pct})
+
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 # ── Last 3 games EV from Savant Statcast search ───────────────────────────────
@@ -529,7 +537,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Minimum filters**")
-    min_ab = st.slider("Min at bats", 0, 100, 20, step=5)
+    min_ab = st.slider("Min at bats", 0, 100, 5, step=5)
     min_hr = st.slider("Min HR",      0,  20,  0, step=1)
 
     st.markdown("---")
