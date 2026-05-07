@@ -439,8 +439,7 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "Avg EV (L3G)": 0.70,
-    "HH%":          0.10,
+    "Avg EV (L3G)": 0.80,
     "FB% (L3G)":    0.10,
     "Pitcher HR/9": 0.05,
     "Park factor":  0.05,
@@ -503,7 +502,7 @@ DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "HH%",
-    "EV (L3G)", "FB% (L3G)",
+    "Avg EV (L3G)", "FB% (L3G)",
     "SLG",
     "Park factor", "Pitcher HR/9",
     "Matchup score",
@@ -546,8 +545,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV (last 3 games) — 70%")
-    st.caption("• HH% (season) — 10%")
+    st.caption("• Avg EV (last 3 games) — 80%")
     st.caption("• FB% (last 3 games) — 10%")
     st.caption("• Pitcher HR/9 — 5%")
     st.caption("• Park factor — 5%")
