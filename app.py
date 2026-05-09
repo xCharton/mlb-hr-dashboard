@@ -441,8 +441,7 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 SCORE_WEIGHTS = {
     "Avg EV (L3G)": 0.80,
     "FB% (L3G)":    0.10,
-    "Pitcher HR/9": 0.05,
-    "Park factor":  0.05,
+    "Pitcher HR/9": 0.10,
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -547,8 +546,7 @@ with st.sidebar:
     st.caption("100 = best matchup on today's slate.")
     st.caption("• Avg EV (last 3 games) — 80%")
     st.caption("• FB% (last 3 games) — 10%")
-    st.caption("• Pitcher HR/9 — 5%")
-    st.caption("• Park factor — 5%")
+    st.caption("• Pitcher HR/9 — 10%")
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
