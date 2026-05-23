@@ -577,7 +577,6 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        st.info(f"Pitch type split cols: {list(df.columns[:25])}")
     except Exception:
         return pd.DataFrame()
 
@@ -594,33 +593,29 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
     if not pitch_col:
         return pd.DataFrame()
 
-    # Map stat columns
-    brl_col   = next((c for c in df.columns if "brl" in c.lower() and "percent" in c.lower()), None)
-    hh_col    = next((c for c in df.columns if "hard_hit" in c.lower()), None)
-    whiff_col = next((c for c in df.columns if "whiff" in c.lower()), None)
-    pull_col  = next((c for c in df.columns if "pull" in c.lower() and "air" in c.lower()), None)
-
-    stat_cols = {k: v for k, v in {
-        brl_col:   "Barrel%", hh_col: "HH%",
-        whiff_col: "SwStr%",  pull_col: "Pull Air%",
-    }.items() if k}
-
-    if not stat_cols:
-        return pd.DataFrame()
-
-    for col in stat_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Confirmed columns from this endpoint:
+    # whiff_percent, hard_hit_percent, woba, slg, k_percent
+    stat_map = {
+        "whiff_percent":    "SwStr%",
+        "hard_hit_percent": "HH%",
+        "woba":             "wOBA",
+        "slg":              "SLG",
+        "k_percent":        "K%",
+    }
+    for col in stat_map:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Pivot: one row per player, cols named Stat(PitchType)
     rows = {}
     for _, row in df.iterrows():
-        player    = row["Player"]
-        pitch     = str(row[pitch_col]).strip()
+        player = row["Player"]
+        pitch  = str(row[pitch_col]).strip()
         if player not in rows:
             rows[player] = {"Player": player}
-        for src_col, display_name in stat_cols.items():
-            col_name = f"{display_name} ({pitch})"
-            rows[player][col_name] = row[src_col]
+        for src_col, display_name in stat_map.items():
+            if src_col in df.columns:
+                rows[player][f"{display_name} ({pitch})"] = row[src_col]
 
     return pd.DataFrame(list(rows.values()))
 
@@ -689,7 +684,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             row[col] = b.get(col, None)
         # Pitch-type split stats vs top pitch
         if top_pitch:
-            for stat in ["Barrel%", "HH%", "SwStr%", "Pull Air%"]:
+            for stat in ["SwStr%", "HH%", "wOBA", "SLG", "K%"]:
                 src = f"{stat} ({top_pitch})"
                 row[f"{stat} vs top pitch"] = b.get(src, None)
         rows.append(row)
@@ -703,34 +698,34 @@ BASE_DISPLAY_COLS = [
     "HR (vs L)", "SLG (vs L)",
     "Avg EV (L3G)", "FB% (L3G)",
     "Barrel%", "HH%", "SwStr%",
-    "Barrel% vs top pitch", "HH% vs top pitch",
-    "SwStr% vs top pitch", "Pull Air% vs top pitch",
+    "SwStr% vs top pitch", "HH% vs top pitch",
+    "wOBA vs top pitch", "K% vs top pitch",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
     "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
-    "Barrel% vs top pitch", "HH% vs top pitch", "Pull Air% vs top pitch",
+    "HH% vs top pitch", "wOBA vs top pitch",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
-LOW_GOOD = ["SwStr%", "SwStr% vs top pitch"]
+LOW_GOOD = ["SwStr%", "SwStr% vs top pitch", "K% vs top pitch"]
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
-        "Avg EV (L3G)":           "{:.1f}",
-        "FB% (L3G)":              "{:.1f}%",
-        "Barrel%":                "{:.1f}%",
-        "HH%":                    "{:.1f}%",
-        "SwStr%":                 "{:.1f}%",
-        "Barrel% vs top pitch":   "{:.1f}%",
-        "HH% vs top pitch":       "{:.1f}%",
-        "SwStr% vs top pitch":    "{:.1f}%",
-        "Pull Air% vs top pitch": "{:.1f}%",
-        "SLG":                    "{:.3f}",
-        "SLG (vs R)":             "{:.3f}",
-        "SLG (vs L)":             "{:.3f}",
-        "Matchup score":          "{:.1f}",
+        "Avg EV (L3G)":        "{:.1f}",
+        "FB% (L3G)":           "{:.1f}%",
+        "Barrel%":             "{:.1f}%",
+        "HH%":                 "{:.1f}%",
+        "SwStr%":              "{:.1f}%",
+        "SwStr% vs top pitch": "{:.1f}%",
+        "HH% vs top pitch":    "{:.1f}%",
+        "wOBA vs top pitch":   "{:.3f}",
+        "K% vs top pitch":     "{:.1f}%",
+        "SLG":                 "{:.3f}",
+        "SLG (vs R)":          "{:.3f}",
+        "SLG (vs L)":          "{:.3f}",
+        "Matchup score":       "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
