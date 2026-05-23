@@ -185,20 +185,48 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     rename = {
-        "avg_hit_speed":         "Avg EV",
-        "ev95percent":           "HH%",
-        "hard_hit_percent":      "HH%",
-        "anglesweetspotpercent": "SweetSpot%",
-        "brl_percent":           "Barrel%",
-        "barrel_batted_rate":    "Barrel%",
-        "whiff_percent":         "SwStr%",
+        "avg_hit_speed": "Avg EV",
+        "ev95percent":   "HH%",
+        "brl_percent":   "Barrel%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    keep = ["Player"] + [c for c in ["Avg EV", "HH%", "Barrel%", "SwStr%"] if c in df.columns]
+    keep = ["Player"] + [c for c in ["Avg EV", "HH%", "Barrel%"] if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["Player"])
+
+# ── Savant: SwStr% from whiff leaderboard ────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_savant_swstr(season: int) -> pd.DataFrame:
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/statcast"
+        f"?type=batter&id=whiff_percent&sportId=1"
+        f"&season={season}&season_end={season}&min=50&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    df = add_player_col(df)
+    if "Player" not in df.columns:
+        return pd.DataFrame()
+
+    whiff_col = next(
+        (c for c in df.columns if c.lower() in ("whiff_percent", "whiff_pct")),
+        next((c for c in df.columns if "whiff" in c.lower()), None)
+    )
+    if not whiff_col:
+        return pd.DataFrame()
+
+    df = df.rename(columns={whiff_col: "SwStr%"})
+    df["SwStr%"] = pd.to_numeric(df["SwStr%"], errors="coerce")
+    if df["SwStr%"].dropna().max() < 1.0:
+        df["SwStr%"] = df["SwStr%"] * 100
+    return df[["Player", "SwStr%"]].dropna(subset=["Player"])
 
 # ── Savant: FB% from exit velocity spray leaderboard ─────────────────────────
 @st.cache_data(ttl=3600)
@@ -284,9 +312,9 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     if not brl_col:
         return pd.DataFrame()
 
-    df = df.rename(columns={brl_col: "Brl/BIP%"})
-    df = df[["Player", "Brl/BIP%"]].copy()
-    df["Brl/BIP%"] = pd.to_numeric(df["Brl/BIP%"], errors="coerce")
+    df = df.rename(columns={brl_col: "Barrel%"})
+    df = df[["Player", "Barrel%"]].copy()
+    df["Barrel%"] = pd.to_numeric(df["Barrel%"], errors="coerce")
     return df.dropna(subset=["Player"])
 
 # ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
@@ -589,7 +617,11 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    pitch_col = next((c for c in df.columns if c.lower() in ("pitch_type", "pitch_name")), None)
+    # Always use pitch_type (codes like FF, SI, SL) not pitch_name for pivot keys
+    # so they match the extract_top_pitch codes used in build_raw_rows
+    pitch_col = next((c for c in df.columns if c.lower() == "pitch_type"), None)
+    if not pitch_col:
+        pitch_col = next((c for c in df.columns if c.lower() == "pitch_name"), None)
     if not pitch_col:
         return pd.DataFrame()
 
@@ -644,7 +676,6 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
 STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "SwStr%"]
-
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -772,6 +803,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     games             = fetch_schedule(date_str)
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
+    sc_swstr          = fetch_savant_swstr(season)
     sc_fb             = fetch_savant_fb(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
@@ -815,7 +847,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_fb]:
+for src in [sc_main, sc_barrels, sc_swstr, sc_fb]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
 
