@@ -442,8 +442,7 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def fetch_pitch_mix(season: int) -> pd.DataFrame:
     """
-    Pulls pitch arsenal usage % for all pitchers from Savant.
-    Returns one row per pitcher with their top pitches and usage %.
+    Pulls pitch arsenal usage % for all pitchers from Savant for the given season.
     """
     url = (
         f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
@@ -468,30 +467,46 @@ def fetch_pitch_mix(season: int) -> pd.DataFrame:
     else:
         return pd.DataFrame()
 
-    # pitch_type and run_value_per_100 or pitch_usage columns
-    pitch_col  = next((c for c in df.columns if c.lower() in ("pitch_type", "pitch_name")), None)
-    usage_col  = next((c for c in df.columns if "percent" in c.lower() and "pitch" in c.lower()), 
-                  next((c for c in df.columns if c.lower() in ("pitch_usage", "pitch_percent", "pitches")), None))
+    pitch_col = next((c for c in df.columns if c.lower() in ("pitch_type", "pitch_name")), None)
+    usage_col = next(
+        (c for c in df.columns if "percent" in c.lower() and "pitch" in c.lower()),
+        next((c for c in df.columns if c.lower() in ("pitch_usage", "pitch_percent", "pitches")), None)
+    )
 
     if not pitch_col or not usage_col:
         return pd.DataFrame()
 
     df[usage_col] = pd.to_numeric(df[usage_col], errors="coerce")
 
-    # Build "Fastball 62%, Slider 22%, Changeup 16%" string per pitcher
+    # If values look like raw counts (max >> 100), convert to % within each pitcher
+    col_max = df[usage_col].dropna().max()
+
     rows = []
     for pitcher, group in df.groupby("Pitcher"):
-        top = (group.sort_values(usage_col, ascending=False)
-                    .head(4)[[pitch_col, usage_col]]
-                    .dropna())
-        if top.empty:
+        group = group[[pitch_col, usage_col]].dropna()
+        if group.empty:
             continue
+
+        total = group[usage_col].sum()
+        if total == 0:
+            continue
+
+        # If raw counts, calculate % ourselves; if already %, use directly
+        if col_max > 100:
+            group = group.copy()
+            group[usage_col] = (group[usage_col] / total * 100).round(1)
+        elif col_max <= 1.0:
+            group = group.copy()
+            group[usage_col] = (group[usage_col] * 100).round(1)
+
+        top = group.sort_values(usage_col, ascending=False).head(4)
         mix = ", ".join(
             f"{row[pitch_col]} {row[usage_col]:.0f}%"
             for _, row in top.iterrows()
             if row[usage_col] >= 5
         )
-        rows.append({"Pitcher": pitcher, "Pitch mix": mix})
+        if mix:
+            rows.append({"Pitcher": pitcher, "Pitch mix": mix})
 
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
