@@ -438,6 +438,63 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+# ── Fetch pitcher pitch mix from Savant ───────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_pitch_mix(season: int) -> pd.DataFrame:
+    """
+    Pulls pitch arsenal usage % for all pitchers from Savant.
+    Returns one row per pitcher with their top pitches and usage %.
+    """
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+        f"?type=pitcher&pitchType=&year={season}&team=&min=10&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Name column
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+    if name_col:
+        df["Pitcher"] = df[name_col].apply(parse_savant_name)
+    elif "player_name" in df.columns:
+        df["Pitcher"] = df["player_name"].apply(parse_savant_name)
+    else:
+        return pd.DataFrame()
+
+    # pitch_type and run_value_per_100 or pitch_usage columns
+    pitch_col  = next((c for c in df.columns if c.lower() in ("pitch_type", "pitch_name")), None)
+    usage_col  = next((c for c in df.columns if "percent" in c.lower() and "pitch" in c.lower()), 
+                  next((c for c in df.columns if c.lower() in ("pitch_usage", "pitch_percent", "pitches")), None))
+
+    if not pitch_col or not usage_col:
+        return pd.DataFrame()
+
+    df[usage_col] = pd.to_numeric(df[usage_col], errors="coerce")
+
+    # Build "Fastball 62%, Slider 22%, Changeup 16%" string per pitcher
+    rows = []
+    for pitcher, group in df.groupby("Pitcher"):
+        top = (group.sort_values(usage_col, ascending=False)
+                    .head(4)[[pitch_col, usage_col]]
+                    .dropna())
+        if top.empty:
+            continue
+        mix = ", ".join(
+            f"{row[pitch_col]} {row[usage_col]:.0f}%"
+            for _, row in top.iterrows()
+            if row[usage_col] >= 5
+        )
+        rows.append({"Pitcher": pitcher, "Pitch mix": mix})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
 # ── Fetch batter handedness splits (vs L / vs R) ──────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_batter_splits(season: int) -> pd.DataFrame:
@@ -615,12 +672,13 @@ st.caption(
 )
 
 with st.spinner("Loading schedule, Statcast, and pitcher data..."):
-    games      = fetch_schedule(date_str)
-    sc_main    = fetch_savant_main(season)
-    sc_barrels = fetch_savant_barrels(season)
-    sc_fb      = fetch_savant_fb(season)
-    pitcher_df = fetch_pitcher_stats(season)
-    splits_df  = fetch_batter_splits(season)
+    games        = fetch_schedule(date_str)
+    sc_main      = fetch_savant_main(season)
+    sc_barrels   = fetch_savant_barrels(season)
+    sc_fb        = fetch_savant_fb(season)
+    pitcher_df   = fetch_pitcher_stats(season)
+    splits_df    = fetch_batter_splits(season)
+    pitch_mix_df = fetch_pitch_mix(season)
 
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
@@ -738,13 +796,21 @@ for g in selected_games:
         (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
          f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
     ]:
+        # Look up pitch mix for this pitcher
+        pm_row  = pitch_mix_df[pitch_mix_df["Pitcher"] == opp_pitcher] if not pitch_mix_df.empty else pd.DataFrame()
+        mix_str = pm_row.iloc[0]["Pitch mix"] if not pm_row.empty else "Pitch mix unavailable"
+
         st.markdown(
             f"<div style='background:var(--color-background-secondary);"
             f"border-left:3px solid {border};"
-            f"padding:8px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
+            f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
             f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
-            f"<span style='font-size:12px;color:var(--color-text-secondary)'>"
-            f" batting vs {opp_pitcher}</span></div>",
+            f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {opp_pitcher}</span>"
+            f"</div>"
+            f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
+            f"🎯 Pitch mix: {mix_str}</div>"
+            f"</div>",
             unsafe_allow_html=True,
         )
         team_df = (
