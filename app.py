@@ -188,7 +188,8 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_speed":         "Avg EV",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-    }    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
