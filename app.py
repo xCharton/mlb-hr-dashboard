@@ -188,8 +188,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_speed":         "Avg EV",
         "ev95percent":           "HH%",
         "anglesweetspotpercent": "SweetSpot%",
-    }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    }    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     keep = ["Player"] + [c for c in rename.values() if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
@@ -374,6 +373,8 @@ def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
     url = (
         f"https://baseballsavant.mlb.com/statcast_search/csv"
         f"?all=true&hfGT=R%7C&hfSea={season}%7C&player_type=batter"
+        f"&hfAB=single%7Cdouble%7Ctriple%7Chome_run%7Cfield_out%7Cgrounded_into_double_play"
+        f"%7Cforce_out%7Cfield_error%7Csac_fly%7Csac_bunt%7Cdouble_play%7Ctriple_play%7C"
         f"&game_date_gt={start_date}&game_date_lt={end_date}"
         f"&team={team_id}&min_results=0&type=details&csv=true"
     )
@@ -398,6 +399,7 @@ def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
         lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
     )
     df["launch_speed"] = pd.to_numeric(df["launch_speed"], errors="coerce")
+    df = df[df["launch_speed"] > 0]  # drop nulls and any zero readings
 
     return (
         df.groupby("Player")["launch_speed"]
