@@ -475,77 +475,93 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-# ── Fetch pitcher pitch mix from Savant ───────────────────────────────────────
+# ── Fetch pitcher pitch mix by batter handedness ──────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_pitch_mix(season: int) -> pd.DataFrame:
+def fetch_pitch_mix_by_hand(season: int) -> pd.DataFrame:
     """
-    Pulls pitch arsenal usage % for all pitchers from Savant for the given season.
+    Pulls pitch usage % for all pitchers broken down by batter handedness (L/R).
+    Returns one row per pitcher per pitch type per batter hand.
+    Savant batSide param: L = vs lefties, R = vs righties.
     """
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-        f"?type=pitcher&pitchType=&year={season}&team=&min=10&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    # Name column
-    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
-    if name_col:
-        df["Pitcher"] = df[name_col].apply(parse_savant_name)
-    elif "player_name" in df.columns:
-        df["Pitcher"] = df["player_name"].apply(parse_savant_name)
-    else:
-        return pd.DataFrame()
-
-    pitch_col = next((c for c in df.columns if c.lower() in ("pitch_type", "pitch_name")), None)
-    usage_col = next(
-        (c for c in df.columns if "percent" in c.lower() and "pitch" in c.lower()),
-        next((c for c in df.columns if c.lower() in ("pitch_usage", "pitch_percent", "pitches")), None)
-    )
-
-    if not pitch_col or not usage_col:
-        return pd.DataFrame()
-
-    df[usage_col] = pd.to_numeric(df[usage_col], errors="coerce")
-
-    # If values look like raw counts (max >> 100), convert to % within each pitcher
-    col_max = df[usage_col].dropna().max()
-
-    rows = []
-    for pitcher, group in df.groupby("Pitcher"):
-        group = group[[pitch_col, usage_col]].dropna()
-        if group.empty:
-            continue
-
-        total = group[usage_col].sum()
-        if total == 0:
-            continue
-
-        # If raw counts, calculate % ourselves; if already %, use directly
-        if col_max > 100:
-            group = group.copy()
-            group[usage_col] = (group[usage_col] / total * 100).round(1)
-        elif col_max <= 1.0:
-            group = group.copy()
-            group[usage_col] = (group[usage_col] * 100).round(1)
-
-        top = group.sort_values(usage_col, ascending=False).head(4)
-        mix = ", ".join(
-            f"{row[pitch_col]} {row[usage_col]:.0f}%"
-            for _, row in top.iterrows()
-            if row[usage_col] >= 5
+    frames = []
+    for hand in ["L", "R"]:
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
+            f"?type=pitcher&pitchType=&year={season}&team=&min=10"
+            f"&batSide={hand}&csv=true"
         )
-        if mix:
-            rows.append({"Pitcher": pitcher, "Pitch mix": mix})
+        try:
+            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+        except Exception:
+            continue
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+        if df.empty:
+            continue
+
+        name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+        if not name_col:
+            continue
+        df["Pitcher"]   = df[name_col].apply(parse_savant_name)
+        df["batter_hand"] = hand
+
+        pitch_col = next((c for c in df.columns if c.lower() == "pitch_type"), None)
+        usage_col = next(
+            (c for c in df.columns if "percent" in c.lower() and "pitch" in c.lower()),
+            next((c for c in df.columns if c.lower() in ("pitch_usage", "pitch_percent", "pitches")), None)
+        )
+        if not pitch_col or not usage_col:
+            continue
+
+        df[usage_col] = pd.to_numeric(df[usage_col], errors="coerce")
+        col_max = df[usage_col].dropna().max()
+
+        # Normalise to % if raw counts
+        if col_max > 100:
+            for pitcher, grp in df.groupby("Pitcher"):
+                total = grp[usage_col].sum()
+                if total > 0:
+                    df.loc[grp.index, usage_col] = (grp[usage_col] / total * 100).round(1)
+        elif col_max <= 1.0:
+            df[usage_col] = (df[usage_col] * 100).round(1)
+
+        frames.append(df[["Pitcher", "batter_hand", pitch_col, usage_col]].rename(
+            columns={pitch_col: "pitch_type", usage_col: "usage_pct"}
+        ))
+
+    return pd.concat(frames).reset_index(drop=True) if frames else pd.DataFrame()
+
+def get_qualifying_pitches(pitch_mix_by_hand: pd.DataFrame, pitcher: str,
+                           batter_hand: str, min_pct: float = 18.0):
+    """
+    Returns list of pitch type codes the pitcher throws ≥ min_pct% vs this batter hand.
+    Falls back to overall top pitch if nothing qualifies.
+    """
+    if pitch_mix_by_hand.empty:
+        return []
+    sub = pitch_mix_by_hand[
+        (pitch_mix_by_hand["Pitcher"] == pitcher) &
+        (pitch_mix_by_hand["batter_hand"] == batter_hand) &
+        (pitch_mix_by_hand["usage_pct"] >= min_pct)
+    ].sort_values("usage_pct", ascending=False)
+    return sub["pitch_type"].tolist()
+
+def build_pitch_mix_str(pitch_mix_by_hand: pd.DataFrame, pitcher: str, batter_hand: str):
+    """Build display string for game header showing pitches vs this batter hand."""
+    if pitch_mix_by_hand.empty:
+        return "Pitch mix unavailable"
+    sub = pitch_mix_by_hand[
+        (pitch_mix_by_hand["Pitcher"] == pitcher) &
+        (pitch_mix_by_hand["batter_hand"] == batter_hand)
+    ].sort_values("usage_pct", ascending=False).head(5)
+    if sub.empty:
+        return "Pitch mix unavailable"
+    return ", ".join(
+        f"{row['pitch_type']} {row['usage_pct']:.0f}%"
+        for _, row in sub.iterrows()
+        if row["usage_pct"] >= 5
+    )
 
 # ── Fetch batter handedness splits (vs L / vs R) ──────────────────────────────
 @st.cache_data(ttl=3600)
@@ -691,11 +707,22 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
     opp_hand    = pr.iloc[0]["Pitcher hand"] if not pr.empty else "R"
     split_label = f"vs {opp_hand}"
 
-    # Get pitcher's top pitch type for pitch-split columns
-    top_pitch = pr.iloc[0].get("Top pitch", None) if not pr.empty else None
-
     rows = []
     for _, b in batters.iterrows():
+        # Determine batter hand: if they have vs L splits but no vs R, they're L-handed etc
+        has_vsr = b.get("HR (vs R)", None) is not None
+        has_vsl = b.get("HR (vs L)", None) is not None
+        batter_hand = "L" if has_vsl and not has_vsr else "R"
+
+        # Get all pitches thrown ≥18% vs this batter hand
+        qual_pitches = get_qualifying_pitches(pitch_mix_by_hand, opp_pitcher, batter_hand)
+
+        # Average batter stats across all qualifying pitches
+        def avg_stat_vs_pitches(stat_name):
+            vals = [b.get(f"{stat_name} ({p})", None) for p in qual_pitches]
+            vals = [v for v in vals if v is not None and not pd.isna(v)]
+            return round(sum(vals) / len(vals), 3) if vals else None
+
         row = {
             "Player":               b["Player"],
             "Batting team":         batting_team,
@@ -709,16 +736,12 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             "FB% (L3G)":            b.get("FB% (L3G)", None),
             "Matchup score":        None,
             "_split_label":         split_label,
-            "_top_pitch":           top_pitch,
+            "_qual_pitches":        ",".join(qual_pitches) if qual_pitches else "",
         }
-        # Season Statcast stats
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
-        # Pitch-type split stats vs top pitch
-        if top_pitch:
-            for stat in ["HH%", "wOBA", "xwOBA", "K%"]:
-                src = f"{stat} ({top_pitch})"
-                row[f"{stat} vs top pitch"] = b.get(src, None)
+        for stat in ["HH%", "wOBA", "xwOBA", "K%"]:
+            row[f"{stat} vs pitch mix"] = avg_stat_vs_pitches(stat)
         rows.append(row)
     return rows
 
@@ -730,33 +753,33 @@ BASE_DISPLAY_COLS = [
     "HR (vs L)", "SLG (vs L)",
     "Avg EV (L3G)", "FB% (L3G)",
     "Barrel%", "HH%",
-    "HH% vs top pitch", "wOBA vs top pitch",
-    "xwOBA vs top pitch", "K% vs top pitch",
+    "HH% vs pitch mix", "wOBA vs pitch mix",
+    "xwOBA vs pitch mix", "K% vs pitch mix",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
     "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
-    "HH% vs top pitch", "wOBA vs top pitch", "xwOBA vs top pitch",
+    "HH% vs pitch mix", "wOBA vs pitch mix", "xwOBA vs pitch mix",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
-LOW_GOOD = ["K% vs top pitch"]
+LOW_GOOD = ["K% vs pitch mix"]
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
-        "Avg EV (L3G)":        "{:.1f}",
-        "FB% (L3G)":           "{:.1f}%",
-        "Barrel%":             "{:.1f}%",
-        "HH%":                 "{:.1f}%",
-        "HH% vs top pitch":    "{:.1f}%",
-        "wOBA vs top pitch":   "{:.3f}",
-        "xwOBA vs top pitch":  "{:.3f}",
-        "K% vs top pitch":     "{:.1f}%",
-        "SLG":                 "{:.3f}",
-        "SLG (vs R)":          "{:.3f}",
-        "SLG (vs L)":          "{:.3f}",
-        "Matchup score":       "{:.1f}",
+        "Avg EV (L3G)":       "{:.1f}",
+        "FB% (L3G)":          "{:.1f}%",
+        "Barrel%":            "{:.1f}%",
+        "HH%":                "{:.1f}%",
+        "HH% vs pitch mix":   "{:.1f}%",
+        "wOBA vs pitch mix":  "{:.3f}",
+        "xwOBA vs pitch mix": "{:.3f}",
+        "K% vs pitch mix":    "{:.1f}%",
+        "SLG":                "{:.3f}",
+        "SLG (vs R)":         "{:.3f}",
+        "SLG (vs L)":         "{:.3f}",
+        "Matchup score":      "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
@@ -806,38 +829,8 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_fb             = fetch_savant_fb(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
-    pitch_mix_df      = fetch_pitch_mix(season)
+    pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
     pitch_type_splits = fetch_pitch_type_splits(season)
-
-# Add top pitch to pitcher_df from pitch_mix_df
-if not pitch_mix_df.empty and "Pitch mix" in pitch_mix_df.columns:
-    def extract_top_pitch(mix_str):
-        if not mix_str or mix_str == "Pitch mix unavailable":
-            return None
-        first = mix_str.split(",")[0].strip()
-        # Mix string is "FF 39%, SL 33%..." — first word is already the pitch code
-        code = first.split(" ")[0].strip().upper()
-        # Valid Savant pitch type codes
-        valid_codes = {"FF","SI","FC","SL","CU","CH","FS","ST","KC","KN","SC","CS","FO","EP"}
-        if code in valid_codes:
-            return code
-        # Fallback: try matching full pitch names if pitch_name col was used instead
-        name_map = {
-            "four-seam": "FF", "fastball": "FF", "sinker": "SI",
-            "cutter": "FC", "slider": "SL", "curveball": "CU",
-            "changeup": "CH", "splitter": "FS", "sweeper": "ST",
-            "knuckleball": "KN", "screwball": "SC",
-        }
-        first_lower = first.lower()
-        for key, pitch_code in name_map.items():
-            if key in first_lower:
-                return pitch_code
-        return None
-    pitch_mix_df["Top pitch"] = pitch_mix_df["Pitch mix"].apply(extract_top_pitch)
-    pitcher_df = pitcher_df.merge(
-        pitch_mix_df[["Pitcher", "Pitch mix", "Top pitch"]],
-        on="Pitcher", how="left"
-    )
 
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
@@ -967,9 +960,9 @@ for g in selected_games:
         (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
          f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
     ]:
-        # Look up pitch mix for this pitcher
-        pm_row  = pitch_mix_df[pitch_mix_df["Pitcher"] == opp_pitcher] if not pitch_mix_df.empty else pd.DataFrame()
-        mix_str = pm_row.iloc[0]["Pitch mix"] if not pm_row.empty else "Pitch mix unavailable"
+        # Determine batter hand for pitch mix display (opposite of pitcher hand)
+        batter_hand_display = "R" if batting_team == g["away_team"] else "R"
+        mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
 
         st.markdown(
             f"<div style='background:var(--color-background-secondary);"
@@ -986,7 +979,7 @@ for g in selected_games:
         )
         team_df = (
             full_df[full_df["_key"] == key]
-            .drop(columns=["_key", "_split_label", "_top_pitch"], errors="ignore")
+            .drop(columns=["_key", "_split_label", "_qual_pitches"], errors="ignore")
             .sort_values("Matchup score", ascending=False)
             .reset_index(drop=True)
         )
@@ -1016,7 +1009,7 @@ st.markdown("---")
 st.subheader("Top picks across today's slate")
 
 chart_df = (
-    full_df.drop(columns=["_key", "_split_label", "_top_pitch"], errors="ignore")
+    full_df.drop(columns=["_key", "_split_label", "_qual_pitches"], errors="ignore")
     .sort_values("Matchup score", ascending=False)
     .reset_index(drop=True)
 )
