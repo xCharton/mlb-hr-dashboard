@@ -815,8 +815,13 @@ if not pitch_mix_df.empty and "Pitch mix" in pitch_mix_df.columns:
         if not mix_str or mix_str == "Pitch mix unavailable":
             return None
         first = mix_str.split(",")[0].strip()
-        # Extract pitch type abbreviation from "Four-Seam Fastball 58%"
-        # Map common names to Savant pitch type codes
+        # Mix string is "FF 39%, SL 33%..." — first word is already the pitch code
+        code = first.split(" ")[0].strip().upper()
+        # Valid Savant pitch type codes
+        valid_codes = {"FF","SI","FC","SL","CU","CH","FS","ST","KC","KN","SC","CS","FO","EP"}
+        if code in valid_codes:
+            return code
+        # Fallback: try matching full pitch names if pitch_name col was used instead
         name_map = {
             "four-seam": "FF", "fastball": "FF", "sinker": "SI",
             "cutter": "FC", "slider": "SL", "curveball": "CU",
@@ -824,9 +829,9 @@ if not pitch_mix_df.empty and "Pitch mix" in pitch_mix_df.columns:
             "knuckleball": "KN", "screwball": "SC",
         }
         first_lower = first.lower()
-        for key, code in name_map.items():
+        for key, pitch_code in name_map.items():
             if key in first_lower:
-                return code
+                return pitch_code
         return None
     pitch_mix_df["Top pitch"] = pitch_mix_df["Pitch mix"].apply(extract_top_pitch)
     pitcher_df = pitcher_df.merge(
@@ -847,18 +852,23 @@ if hitting_df.empty:
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
 for src in [sc_main, sc_barrels, sc_fb]:
-    if not src.empty:
-        hitting_df = hitting_df.merge(src, on="Player", how="left")
+    if src.empty:
+        continue
+    # Only merge columns not already in hitting_df to avoid duplicates
+    new_cols = [c for c in src.columns if c not in hitting_df.columns or c == "Player"]
+    if len(new_cols) <= 1:
+        continue
+    hitting_df = hitting_df.merge(src[new_cols], on="Player", how="left")
 
 if not splits_df.empty:
-    hitting_df = hitting_df.merge(splits_df, on="Player", how="left")
+    new_cols = [c for c in splits_df.columns if c not in hitting_df.columns or c == "Player"]
+    if len(new_cols) > 1:
+        hitting_df = hitting_df.merge(splits_df[new_cols], on="Player", how="left")
 
 if not pitch_type_splits.empty:
-    st.write("Barrel% sample:", hitting_df["Barrel%"].dropna().head(3).tolist() if "Barrel%" in hitting_df.columns else "MISSING")
-st.write("Pitch splits cols sample:", [c for c in hitting_df.columns if "vs top" in c][:5])
-st.write("Dylan Cease top pitch:", pitcher_df[pitcher_df["Pitcher"] == "Dylan Cease"]["Top pitch"].tolist() if "Top pitch" in pitcher_df.columns else "NO TOP PITCH COL")
-st.write("Pitch type splits shape:", pitch_type_splits.shape if not pitch_type_splits.empty else "EMPTY")
-hitting_df = hitting_df.merge(pitch_type_splits, on="Player", how="left")
+    new_cols = [c for c in pitch_type_splits.columns if c not in hitting_df.columns or c == "Player"]
+    if len(new_cols) > 1:
+        hitting_df = hitting_df.merge(pitch_type_splits[new_cols], on="Player", how="left")
 
 for col in STATCAST_COLS:
     if col not in hitting_df.columns:
