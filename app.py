@@ -517,13 +517,13 @@ def fetch_pitch_mix_by_hand(season: int) -> pd.DataFrame:
         df[usage_col] = pd.to_numeric(df[usage_col], errors="coerce")
         col_max = df[usage_col].dropna().max()
 
-        # Normalise to % if raw counts
+        # Normalise to % if raw counts — work on a copy to avoid pandas TypeError
         if col_max > 100:
-            for pitcher, grp in df.groupby("Pitcher"):
-                total = grp[usage_col].sum()
-                if total > 0:
-                    df.loc[grp.index, usage_col] = (grp[usage_col] / total * 100).round(1)
+            totals = df.groupby("Pitcher")[usage_col].transform("sum")
+            df = df.copy()
+            df[usage_col] = (df[usage_col] / totals * 100).round(1)
         elif col_max <= 1.0:
+            df = df.copy()
             df[usage_col] = (df[usage_col] * 100).round(1)
 
         frames.append(df[["Pitcher", "batter_hand", pitch_col, usage_col]].rename(
