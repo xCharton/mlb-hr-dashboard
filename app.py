@@ -670,19 +670,25 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "Avg EV (L3G)": 0.80,
-    "FB% (L3G)":    0.20,
+    "HH% vs pitch mix":   0.40,
+    "xwOBA vs pitch mix": 0.35,
+    "wOBA vs pitch mix":  0.15,
+    "K% vs pitch mix":    0.10,
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     df    = df.copy()
     score = pd.Series(0.0, index=df.index)
+    # Cols where lower = better (invert before scaling)
+    invert = {"K% vs pitch mix"}
     for col, weight in SCORE_WEIGHTS.items():
         if col not in df.columns or df[col].isna().all():
             continue
         vals   = df[col].fillna(df[col].median())
         lo, hi = vals.min(), vals.max()
         scaled = (vals - lo) / (hi - lo) if hi > lo else pd.Series(0.5, index=df.index)
+        if col in invert:
+            scaled = 1 - scaled   # flip so low K% = high score
         score += scaled * weight
     s_min, s_max = score.min(), score.max()
     df["Matchup score"] = (
@@ -807,9 +813,11 @@ with st.sidebar:
     st.markdown("🟢 Green = best · 🟡 Yellow = average · 🔴 Red = bad")
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
-    st.caption("100 = best matchup on today's slate.")
-    st.caption("• Avg EV (last 3 games) — 80%")
-    st.caption("• FB% (last 3 games) — 20%")
+    st.caption("100 = best HR prop candidate today.")
+    st.caption("• HH% vs pitch mix — 40%")
+    st.caption("• xwOBA vs pitch mix — 35%")
+    st.caption("• wOBA vs pitch mix — 15%")
+    st.caption("• K% vs pitch mix — 10% (lower = better)")
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
