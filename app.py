@@ -854,6 +854,10 @@ if not splits_df.empty:
     hitting_df = hitting_df.merge(splits_df, on="Player", how="left")
 
 if not pitch_type_splits.empty:
+    st.write("Barrel% sample:", hitting_df["Barrel%"].dropna().head(3).tolist() if "Barrel%" in hitting_df.columns else "MISSING")
+st.write("Pitch splits cols sample:", [c for c in hitting_df.columns if "vs top" in c][:5])
+st.write("Dylan Cease top pitch:", pitcher_df[pitcher_df["Pitcher"] == "Dylan Cease"]["Top pitch"].tolist() if "Top pitch" in pitcher_df.columns else "NO TOP PITCH COL")
+st.write("Pitch type splits shape:", pitch_type_splits.shape if not pitch_type_splits.empty else "EMPTY")
     hitting_df = hitting_df.merge(pitch_type_splits, on="Player", how="left")
 
 for col in STATCAST_COLS:
