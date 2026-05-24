@@ -285,7 +285,7 @@ def fetch_savant_fb(season: int) -> pd.DataFrame:
         return pd.DataFrame()
     return df.dropna(subset=["Player"])
 
-# ── Savant: barrel leaderboard — Brl/BIP% ─────────────────────────────────────
+# ── Savant: barrel leaderboard — Barrel% ─────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_savant_barrels(season: int) -> pd.DataFrame:
     url = (
@@ -300,13 +300,15 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-    df = add_player_col(df)
-    if "Player" not in df.columns:
+    # This endpoint has confirmed cols: brl_percent, brl_pa, barrels
+    # Name col is "last_name, first_name" (single col with comma)
+    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+    if not name_col:
         return pd.DataFrame()
+    df["Player"] = df[name_col].apply(parse_savant_name)
 
     brl_col = next(
-        (c for c in df.columns
-         if c.lower() in ("brl_percent", "brl_pa", "barrel_batted_rate")),
+        (c for c in df.columns if c.lower() in ("brl_percent", "brl_pa", "barrel_batted_rate")),
         None
     )
     if not brl_col:
@@ -626,12 +628,11 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Confirmed columns from this endpoint:
-    # whiff_percent, hard_hit_percent, woba, slg, k_percent
+    # whiff_percent, hard_hit_percent, woba, est_woba (xwOBA), slg, k_percent
     stat_map = {
-        "whiff_percent":    "SwStr%",
         "hard_hit_percent": "HH%",
         "woba":             "wOBA",
-        "slg":              "SLG",
+        "est_woba":         "xwOBA",
         "k_percent":        "K%",
     }
     for col in stat_map:
@@ -675,7 +676,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "SwStr%"]
+STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -715,7 +716,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             row[col] = b.get(col, None)
         # Pitch-type split stats vs top pitch
         if top_pitch:
-            for stat in ["SwStr%", "HH%", "wOBA", "SLG", "K%"]:
+            for stat in ["HH%", "wOBA", "xwOBA", "K%"]:
                 src = f"{stat} ({top_pitch})"
                 row[f"{stat} vs top pitch"] = b.get(src, None)
         rows.append(row)
@@ -728,19 +729,19 @@ BASE_DISPLAY_COLS = [
     "HR (vs R)", "SLG (vs R)",
     "HR (vs L)", "SLG (vs L)",
     "Avg EV (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%", "SwStr%",
-    "SwStr% vs top pitch", "HH% vs top pitch",
-    "wOBA vs top pitch", "K% vs top pitch",
+    "Barrel%", "HH%",
+    "HH% vs top pitch", "wOBA vs top pitch",
+    "xwOBA vs top pitch", "K% vs top pitch",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
     "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
-    "HH% vs top pitch", "wOBA vs top pitch",
+    "HH% vs top pitch", "wOBA vs top pitch", "xwOBA vs top pitch",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
-LOW_GOOD = ["SwStr%", "SwStr% vs top pitch", "K% vs top pitch"]
+LOW_GOOD = ["K% vs top pitch"]
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
@@ -748,10 +749,9 @@ def style_table(df: pd.DataFrame, cols: list):
         "FB% (L3G)":           "{:.1f}%",
         "Barrel%":             "{:.1f}%",
         "HH%":                 "{:.1f}%",
-        "SwStr%":              "{:.1f}%",
-        "SwStr% vs top pitch": "{:.1f}%",
         "HH% vs top pitch":    "{:.1f}%",
         "wOBA vs top pitch":   "{:.3f}",
+        "xwOBA vs top pitch":  "{:.3f}",
         "K% vs top pitch":     "{:.1f}%",
         "SLG":                 "{:.3f}",
         "SLG (vs R)":          "{:.3f}",
@@ -789,8 +789,8 @@ with st.sidebar:
     st.caption("• FB% (last 3 games) — 20%")
     st.markdown("---")
     st.markdown("**Data sources**")
-    st.caption("MLB Stats API — HR, SLG, schedule, pitchers")
-    st.caption("Baseball Savant — HH%, EV, LA, FB%, SweetSpot%, Brl/BIP%")
+    st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
+    st.caption("Baseball Savant — EV, HH%, Barrel%, pitch mix, vs pitch type")
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -803,7 +803,6 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     games             = fetch_schedule(date_str)
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
-    sc_swstr          = fetch_savant_swstr(season)
     sc_fb             = fetch_savant_fb(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
@@ -847,7 +846,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_swstr, sc_fb]:
+for src in [sc_main, sc_barrels, sc_fb]:
     if not src.empty:
         hitting_df = hitting_df.merge(src, on="Player", how="left")
 
