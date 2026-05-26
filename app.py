@@ -47,7 +47,7 @@ TEAM_ABBREV = {
 }
 
 # ── Savant name parser ─────────────────────────────────────────────────────────
-TEAM_LOGO_URL = "https://www.mlb.com/assets/images/teams/logos/default/{team_id}.svg"
+TEAM_LOGO_URL = "https://www.mlbstatic.com/team-logos/{team_id}.svg"
 
 def team_logo_html(team_id, size=28):
     if not team_id:
