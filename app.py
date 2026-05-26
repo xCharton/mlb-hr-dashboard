@@ -47,6 +47,39 @@ TEAM_ABBREV = {
 }
 
 # ── Savant name parser ─────────────────────────────────────────────────────────
+TEAM_LOGO_URL = "https://www.mlb.com/assets/images/teams/logos/default/{team_id}.svg"
+
+def team_logo_html(team_id, size=28):
+    if not team_id:
+        return ""
+    url = TEAM_LOGO_URL.format(team_id=team_id)
+    return (
+        f'<img src="{url}" width="{size}" height="{size}" '
+        f'style="vertical-align:middle;margin:0 4px;" '
+        f'onerror="this.style.display=\'none\'">'
+    )
+
+# ── Fetch games played this season to calculate qualified AB ──────────────────
+@st.cache_data(ttl=3600)
+def fetch_games_played(season: int) -> int:
+    """Returns max games played by any team so far this season."""
+    url = (
+        f"https://statsapi.mlb.com/api/v1/standings"
+        f"?leagueId=103,104&season={season}&standingsTypes=regularSeason"
+    )
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        records = r.json().get("records", [])
+        max_gp  = max(
+            t.get("teamRecords", [{}])[0].get("gamesPlayed", 0)
+            for rec in records
+            for t in [rec]
+            if rec.get("teamRecords")
+        ) if records else 162
+        return max(max_gp, 1)
+    except Exception:
+        return 162
 def parse_savant_name(val: str) -> str:
     if "," in str(val):
         parts = [p.strip() for p in str(val).split(",")]
@@ -719,7 +752,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 # ── Build raw rows ─────────────────────────────────────────────────────────────
 STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
-                   hitting_df, pitcher_df, min_ab, min_hr):
+                   hitting_df, pitcher_df, qualified_ab, min_hr):
     batters = hitting_df[
         (hitting_df["team_id"] == batting_id) &
         (hitting_df["AB"] >= min_ab) &
@@ -825,8 +858,9 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Minimum filters**")
-    min_ab = st.slider("Min at bats", 0, 100, 5, step=5)
-    min_hr = st.slider("Min HR",      0,  20,  0, step=1)
+    qualified_only = st.checkbox("Qualified batters only", value=True)
+    st.caption("Qualified = 3.1 PA × games played this season")
+    min_hr = st.slider("Min HR", 0, 20, 0, step=1)
 
     st.markdown("---")
     st.markdown("**Colour guide**")
@@ -845,8 +879,10 @@ with st.sidebar:
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
+qual_label = f"Qualified ({qualified_ab}+ AB)" if qualified_only else "All batters"
 st.caption(
     f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
+    f"{qual_label} · {games_played} games played this season · "
     f"Stats refresh hourly · Schedule refreshes every 30 min"
 )
 
@@ -859,6 +895,11 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
     pitch_type_splits = fetch_pitch_type_splits(season)
+    games_played      = fetch_games_played(season)
+
+# Qualified = 3.1 PA per team game played (MLB batting title standard)
+# We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
+qualified_ab = int(3.1 * games_played * 0.87) if qualified_only else 0
 
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
@@ -961,7 +1002,7 @@ for g in selected_games:
          f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
     ]:
         rows = build_raw_rows(batting_id, batting_team, opp_pitcher, g["home_team"],
-                              hitting_df, pitcher_df, min_ab, min_hr)
+                              hitting_df, pitcher_df, qualified_ab, min_hr)
         for row in rows:
             row["_key"] = key
         all_raw.extend(rows)
@@ -978,8 +1019,13 @@ for g in selected_games:
     pf_emoji = "🟢" if pf >= 1.05 else "🔴" if pf <= 0.95 else "⚪"
     pf_label = "Hitter friendly" if pf >= 1.05 else "Pitcher friendly" if pf <= 0.95 else "Neutral park"
 
+    away_logo = team_logo_html(g["away_id"])
+    home_logo = team_logo_html(g["home_id"])
     st.markdown("---")
-    st.markdown(f"### ⚾ {g['away_team']} @ {g['home_team']}")
+    st.markdown(
+        f"### {away_logo} {g['away_team']} @ {home_logo} {g['home_team']}",
+        unsafe_allow_html=True,
+    )
     st.caption(f"{g['time']} · {g['venue']} · {pf_emoji} {pf_label} (PF {pf:.2f})")
 
     for batting_team, border, opp_pitcher, key in [
