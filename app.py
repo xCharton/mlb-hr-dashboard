@@ -879,12 +879,6 @@ with st.sidebar:
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
-qual_label = f"Qualified ({qualified_ab}+ AB)" if qualified_only else "All batters"
-st.caption(
-    f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
-    f"{qual_label} · {games_played} games played this season · "
-    f"Stats refresh hourly · Schedule refreshes every 30 min"
-)
 
 with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     games             = fetch_schedule(date_str)
@@ -900,6 +894,13 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
 # Qualified = 3.1 PA per team game played (MLB batting title standard)
 # We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
 qualified_ab = int(3.1 * games_played * 0.87) if qualified_only else 0
+
+qual_label = f"Qualified ({qualified_ab}+ AB)" if qualified_only else "All batters"
+st.caption(
+    f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
+    f"{qual_label} · {games_played} games played this season · "
+    f"Stats refresh hourly · Schedule refreshes every 30 min"
+)
 
 if not games:
     st.warning(f"No games found for {date_str}. Try a different date.")
