@@ -755,7 +755,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, qualified_ab, min_hr):
     batters = hitting_df[
         (hitting_df["team_id"] == batting_id) &
-        (hitting_df["AB"] >= min_ab) &
+        (hitting_df["AB"] >= qualified_ab) &
         (hitting_df["HR"] >= min_hr)
     ]
     if batters.empty:
