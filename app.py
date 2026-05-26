@@ -28,6 +28,24 @@ PARK_FACTORS = {
     "San Francisco Giants": 0.92, "Miami Marlins": 0.91, "Oakland Athletics": 0.90,
 }
 
+TEAM_ABBREV = {
+    "Arizona Diamondbacks": "ARI", "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL",    "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC",         "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN",      "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL",     "Detroit Tigers": "DET",
+    "Houston Astros": "HOU",       "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA",   "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA",        "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN",      "New York Mets": "NYM",
+    "New York Yankees": "NYY",     "Oakland Athletics": "OAK",
+    "Philadelphia Phillies": "PHI","Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD",      "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA",     "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB",        "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR",    "Washington Nationals": "WSH",
+}
+
 # ── Savant name parser ─────────────────────────────────────────────────────────
 def parse_savant_name(val: str) -> str:
     if "," in str(val):
@@ -107,10 +125,11 @@ def fetch_season_stats(season: int) -> pd.DataFrame:
         slg = round(tb / ab, 3) if ab > 0 else None
 
         rows.append({
-            "player_id": player.get("id"),
-            "Player":    player.get("fullName", "Unknown"),
-            "team_id":   team.get("id"),
-            "Team":      team.get("name", "Unknown"),
+            "player_id":   player.get("id"),
+            "Player":      player.get("fullName", "Unknown"),
+            "Batter hand": player.get("batSide", {}).get("code", "R"),
+            "team_id":     team.get("id"),
+            "Team":        team.get("name", "Unknown"),
             "AB": ab,
             "HR": hr,
             "SLG": slg,
@@ -729,9 +748,10 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             vals = [v for v in vals if v is not None and not pd.isna(v)]
             return round(sum(vals) / len(vals), 3) if vals else None
 
+        hand_label = "LHB" if b.get("Batter hand", "R") == "L" else "RHB"
         row = {
-            "Player":               b["Player"],
-            "Batting team":         batting_team,
+            "Player":               f"{b['Player']} ({hand_label})",
+            "Batting team":         TEAM_ABBREV.get(batting_team, batting_team),
             "Opp pitcher":          opp_pitcher,
             "HR":                   b["HR"],
             "AB":                   b["AB"],
@@ -991,7 +1011,6 @@ for g in selected_games:
             .sort_values("Matchup score", ascending=False)
             .reset_index(drop=True)
         )
-        team_df.index += 1
 
         if team_df.empty:
             st.info(f"No {batting_team} batters match current filters.")
@@ -1008,7 +1027,7 @@ for g in selected_games:
                     f"SLG (vs {'L' if present_split == 'R' else 'R'})"
                 ))
             ]
-            st.dataframe(style_table(team_df, dynamic_cols), use_container_width=True, height=380)
+            st.dataframe(style_table(team_df, dynamic_cols), use_container_width=True, height=380, hide_index=True)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -1021,7 +1040,6 @@ chart_df = (
     .sort_values("Matchup score", ascending=False)
     .reset_index(drop=True)
 )
-chart_df.index += 1
 
 col_a, col_b = st.columns(2)
 
