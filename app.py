@@ -696,12 +696,14 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Confirmed columns from this endpoint:
-    # whiff_percent, hard_hit_percent, woba, est_woba (xwOBA), slg, k_percent
+    # whiff_percent, hard_hit_percent, woba, est_woba (xwOBA), slg, ba, k_percent
     stat_map = {
         "hard_hit_percent": "HH%",
         "woba":             "wOBA",
         "est_woba":         "xwOBA",
         "k_percent":        "K%",
+        "slg":              "_slg",
+        "ba":               "_ba",
     }
     for col in stat_map:
         if col in df.columns:
@@ -717,8 +719,20 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         for src_col, display_name in stat_map.items():
             if src_col in df.columns:
                 rows[player][f"{display_name} ({pitch})"] = row[src_col]
+        # Calculate ISO = SLG - BA per pitch type
+        slg_val = row.get("slg", None)
+        ba_val  = row.get("ba",  None)
+        if slg_val is not None and ba_val is not None:
+            try:
+                iso = round(float(slg_val) - float(ba_val), 3)
+                rows[player][f"ISO ({pitch})"] = iso
+            except (ValueError, TypeError):
+                rows[player][f"ISO ({pitch})"] = None
 
-    return pd.DataFrame(list(rows.values()))
+    result = pd.DataFrame(list(rows.values()))
+    # Drop internal _slg and _ba columns
+    drop_cols = [c for c in result.columns if c.startswith("_slg (") or c.startswith("_ba (")]
+    return result.drop(columns=drop_cols, errors="ignore")
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
@@ -752,10 +766,10 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
 # ── Build raw rows ─────────────────────────────────────────────────────────────
 STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
-                   hitting_df, pitcher_df, qualified_ab, min_hr):
+                   hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
         (hitting_df["team_id"] == batting_id) &
-        (hitting_df["AB"] >= qualified_ab) &
+        (hitting_df["AB"] >= min_ab) &
         (hitting_df["HR"] >= min_hr)
     ]
     if batters.empty:
@@ -799,7 +813,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         }
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
-        for stat in ["HH%", "wOBA", "xwOBA", "K%"]:
+        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO"]:
             row[f"{stat} vs pitch mix"] = avg_stat_vs_pitches(stat)
         rows.append(row)
     return rows
@@ -813,14 +827,14 @@ BASE_DISPLAY_COLS = [
     "Avg EV (L3G)", "FB% (L3G)",
     "Barrel%", "HH%",
     "HH% vs pitch mix", "wOBA vs pitch mix",
-    "xwOBA vs pitch mix", "K% vs pitch mix",
+    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
     "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
-    "HH% vs pitch mix", "wOBA vs pitch mix", "xwOBA vs pitch mix",
+    "HH% vs pitch mix", "wOBA vs pitch mix", "xwOBA vs pitch mix", "ISO vs pitch mix",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
 LOW_GOOD = ["K% vs pitch mix"]
@@ -834,6 +848,7 @@ def style_table(df: pd.DataFrame, cols: list):
         "HH% vs pitch mix":   "{:.1f}%",
         "wOBA vs pitch mix":  "{:.3f}",
         "xwOBA vs pitch mix": "{:.3f}",
+        "ISO vs pitch mix":   "{:.3f}",
         "K% vs pitch mix":    "{:.1f}%",
         "SLG":                "{:.3f}",
         "SLG (vs R)":         "{:.3f}",
@@ -858,8 +873,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Minimum filters**")
-    qualified_only = st.checkbox("Qualified batters only", value=True)
-    st.caption("Qualified = 3.1 PA × games played this season")
+    min_ab = st.slider("Min at bats", 0, 150, 50, step=10)
     min_hr = st.slider("Min HR", 0, 20, 0, step=1)
 
     st.markdown("---")
@@ -893,12 +907,10 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
 
 # Qualified = 3.1 PA per team game played (MLB batting title standard)
 # We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
-qualified_ab = int(3.1 * games_played * 0.87) if qualified_only else 0
-
-qual_label = f"Qualified ({qualified_ab}+ AB)" if qualified_only else "All batters"
+qual_label = f"{min_ab}+ AB"
 st.caption(
     f"Games for {selected_date.strftime('%A, %B %d, %Y')} · "
-    f"{qual_label} · {games_played} games played this season · "
+    f"Min {min_ab} AB · {games_played} games played this season · "
     f"Stats refresh hourly · Schedule refreshes every 30 min"
 )
 
@@ -1003,7 +1015,7 @@ for g in selected_games:
          f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
     ]:
         rows = build_raw_rows(batting_id, batting_team, opp_pitcher, g["home_team"],
-                              hitting_df, pitcher_df, qualified_ab, min_hr)
+                              hitting_df, pitcher_df, min_ab, min_hr)
         for row in rows:
             row["_key"] = key
         all_raw.extend(rows)
