@@ -736,10 +736,11 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH% vs pitch mix":   0.40,
-    "xwOBA vs pitch mix": 0.35,
-    "wOBA vs pitch mix":  0.15,
-    "K% vs pitch mix":    0.10,
+    "HH% vs pitch mix":   0.35,
+    "xwOBA vs pitch mix": 0.30,
+    "ISO vs pitch mix":   0.20,
+    "wOBA vs pitch mix":  0.10,
+    "K% vs pitch mix":    0.05,
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -882,10 +883,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best HR prop candidate today.")
-    st.caption("• HH% vs pitch mix — 40%")
-    st.caption("• xwOBA vs pitch mix — 35%")
-    st.caption("• wOBA vs pitch mix — 15%")
-    st.caption("• K% vs pitch mix — 10% (lower = better)")
+    st.caption("• HH% vs pitch mix — 35%")
+    st.caption("• xwOBA vs pitch mix — 30%")
+    st.caption("• ISO vs pitch mix — 20%")
+    st.caption("• wOBA vs pitch mix — 10%")
+    st.caption("• K% vs pitch mix — 5% (lower = better)")
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
