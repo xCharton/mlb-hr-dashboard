@@ -237,12 +237,13 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     rename = {
-        "avg_hit_speed": "Avg EV",
-        "ev95percent":   "HH%",
-        "brl_percent":   "Barrel%",
+        "avg_hit_speed":  "Avg EV",
+        "avg_hit_angle":  "Avg LA",
+        "ev95percent":    "HH%",
+        "brl_percent":    "Barrel%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    keep = ["Player"] + [c for c in ["Avg EV", "HH%", "Barrel%"] if c in df.columns]
+    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%"] if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -807,6 +808,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             f"HR ({split_label})":  b.get(f"HR ({split_label})", None),
             f"SLG ({split_label})": b.get(f"SLG ({split_label})", None),
             "Avg EV (L3G)":         b.get("Avg EV (L3G)", None),
+            "Avg LA (L3G)":         b.get("Avg LA", None),   # season from Savant
             "FB% (L3G)":            b.get("FB% (L3G)", None),
             "Matchup score":        None,
             "_split_label":         split_label,
@@ -825,7 +827,7 @@ BASE_DISPLAY_COLS = [
     "HR", "AB",
     "HR (vs R)", "SLG (vs R)",
     "HR (vs L)", "SLG (vs L)",
-    "Avg EV (L3G)", "FB% (L3G)",
+    "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
     "Barrel%", "HH%",
     "HH% vs pitch mix", "wOBA vs pitch mix",
     "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
@@ -835,14 +837,50 @@ BASE_DISPLAY_COLS = [
 
 HIGH_GOOD = [
     "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
-    "HH% vs pitch mix", "wOBA vs pitch mix", "xwOBA vs pitch mix", "ISO vs pitch mix",
+    "HH% vs pitch mix",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
 LOW_GOOD = ["K% vs pitch mix"]
 
+# ── Absolute threshold colour helpers ─────────────────────────────────────────
+def _la_color(val):
+    """Green = 25-35°, yellow = 15-25 or 35-45°, red = outside that."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if 25 <= v <= 35:
+        return "background-color:#1a7a1a;color:white"   # dark green
+    elif 15 <= v < 25 or 35 < v <= 45:
+        return "background-color:#c8a000;color:white"   # yellow
+    else:
+        return "background-color:#8b0000;color:white"   # dark red
+
+def _iso_color(val):
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0.300:   return "background-color:#1a7a1a;color:white"
+    elif v > 0.250: return "background-color:#4caf50;color:white"
+    elif v > 0.200: return "background-color:#c8a000;color:white"
+    elif v > 0.160: return "background-color:#c0392b;color:white"
+    else:           return "background-color:#8b0000;color:white"
+
+def _woba_color(val):
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0.400:              return "background-color:#1a7a1a;color:white"
+    elif 0.370 <= v <= 0.400:  return "background-color:#4caf50;color:white"
+    elif 0.340 <= v < 0.370:   return "background-color:#c8a000;color:white"
+    else:                      return "background-color:#8b0000;color:white"
+
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
         "Avg EV (L3G)":       "{:.1f}",
+        "Avg LA (L3G)":       "{:.1f}°",
         "FB% (L3G)":          "{:.1f}%",
         "Barrel%":            "{:.1f}%",
         "HH%":                "{:.1f}%",
@@ -858,12 +896,25 @@ def style_table(df: pd.DataFrame, cols: list):
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
+
+    # Relative gradient cols
     for col in HIGH_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn")
     for col in LOW_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn_r")
+
+    # Absolute threshold cols
+    if "Avg LA (L3G)" in cols and df["Avg LA (L3G)"].notna().any():
+        styled = styled.applymap(_la_color,   subset=["Avg LA (L3G)"])
+    if "ISO vs pitch mix" in cols and df["ISO vs pitch mix"].notna().any():
+        styled = styled.applymap(_iso_color,  subset=["ISO vs pitch mix"])
+    if "wOBA vs pitch mix" in cols and df["wOBA vs pitch mix"].notna().any():
+        styled = styled.applymap(_woba_color, subset=["wOBA vs pitch mix"])
+    if "xwOBA vs pitch mix" in cols and df["xwOBA vs pitch mix"].notna().any():
+        styled = styled.applymap(_woba_color, subset=["xwOBA vs pitch mix"])
+
     return styled
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
