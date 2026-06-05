@@ -907,13 +907,13 @@ def style_table(df: pd.DataFrame, cols: list):
 
     # Absolute threshold cols
     if "Avg LA (L3G)" in cols and df["Avg LA (L3G)"].notna().any():
-        styled = styled.applymap(_la_color,   subset=["Avg LA (L3G)"])
+        styled = styled.map(_la_color,   subset=["Avg LA (L3G)"])
     if "ISO vs pitch mix" in cols and df["ISO vs pitch mix"].notna().any():
-        styled = styled.applymap(_iso_color,  subset=["ISO vs pitch mix"])
+        styled = styled.map(_iso_color,  subset=["ISO vs pitch mix"])
     if "wOBA vs pitch mix" in cols and df["wOBA vs pitch mix"].notna().any():
-        styled = styled.applymap(_woba_color, subset=["wOBA vs pitch mix"])
+        styled = styled.map(_woba_color, subset=["wOBA vs pitch mix"])
     if "xwOBA vs pitch mix" in cols and df["xwOBA vs pitch mix"].notna().any():
-        styled = styled.applymap(_woba_color, subset=["xwOBA vs pitch mix"])
+        styled = styled.map(_woba_color, subset=["xwOBA vs pitch mix"])
 
     return styled
 
