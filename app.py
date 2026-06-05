@@ -836,7 +836,7 @@ BASE_DISPLAY_COLS = [
 ]
 
 HIGH_GOOD = [
-    "Avg EV (L3G)", "FB% (L3G)", "Barrel%", "HH%",
+    "FB% (L3G)",
     "HH% vs pitch mix",
     "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
 ]
@@ -844,23 +844,39 @@ LOW_GOOD = ["K% vs pitch mix"]
 
 # ── Absolute threshold colour helpers ─────────────────────────────────────────
 def _la_color(val):
-    """Green = 25-35°, yellow = 15-25 or 35-45°, red = outside that."""
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return ""
-    if 25 <= v <= 35:
-        return "background-color:#1a7a1a;color:white"   # dark green
-    elif 15 <= v < 25 or 35 < v <= 45:
-        return "background-color:#c8a000;color:white"   # yellow
-    else:
-        return "background-color:#8b0000;color:white"   # dark red
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if 25 <= v <= 35:                       return "background-color:#1a7a1a;color:white"
+    elif 15 <= v < 25 or 35 < v <= 45:     return "background-color:#c8a000;color:white"
+    else:                                   return "background-color:#8b0000;color:white"
+
+def _barrel_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v > 15:      return "background-color:#1a7a1a;color:white"
+    elif v >= 10:   return "background-color:#4caf50;color:white"
+    elif v >= 6:    return "background-color:#c8a000;color:white"
+    else:           return "background-color:#8b0000;color:white"
+
+def _ev_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v >= 100:    return "background-color:#1a7a1a;color:white"
+    elif v >= 95:   return "background-color:#4caf50;color:white"
+    elif v >= 90:   return "background-color:#c8a000;color:white"
+    else:           return "background-color:#8b0000;color:white"
+
+def _hh_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v > 50:      return "background-color:#1a7a1a;color:white"
+    elif v >= 45:   return "background-color:#4caf50;color:white"
+    elif v >= 40:   return "background-color:#c8a000;color:white"
+    else:           return "background-color:#8b0000;color:white"
 
 def _iso_color(val):
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return ""
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
     if v > 0.300:   return "background-color:#1a7a1a;color:white"
     elif v > 0.250: return "background-color:#4caf50;color:white"
     elif v > 0.200: return "background-color:#c8a000;color:white"
@@ -868,14 +884,12 @@ def _iso_color(val):
     else:           return "background-color:#8b0000;color:white"
 
 def _woba_color(val):
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return ""
-    if v > 0.400:              return "background-color:#1a7a1a;color:white"
-    elif 0.370 <= v <= 0.400:  return "background-color:#4caf50;color:white"
-    elif 0.340 <= v < 0.370:   return "background-color:#c8a000;color:white"
-    else:                      return "background-color:#8b0000;color:white"
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v > 0.400:               return "background-color:#1a7a1a;color:white"
+    elif 0.370 <= v <= 0.400:   return "background-color:#4caf50;color:white"
+    elif 0.340 <= v < 0.370:    return "background-color:#c8a000;color:white"
+    else:                       return "background-color:#8b0000;color:white"
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
@@ -897,23 +911,29 @@ def style_table(df: pd.DataFrame, cols: list):
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
 
-    # Relative gradient cols
+    # Relative gradient cols (higher = greener)
     for col in HIGH_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn")
+    # Relative gradient cols (lower = greener)
     for col in LOW_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn_r")
 
     # Absolute threshold cols
-    if "Avg LA (L3G)" in cols and df["Avg LA (L3G)"].notna().any():
-        styled = styled.map(_la_color,   subset=["Avg LA (L3G)"])
-    if "ISO vs pitch mix" in cols and df["ISO vs pitch mix"].notna().any():
-        styled = styled.map(_iso_color,  subset=["ISO vs pitch mix"])
-    if "wOBA vs pitch mix" in cols and df["wOBA vs pitch mix"].notna().any():
-        styled = styled.map(_woba_color, subset=["wOBA vs pitch mix"])
-    if "xwOBA vs pitch mix" in cols and df["xwOBA vs pitch mix"].notna().any():
-        styled = styled.map(_woba_color, subset=["xwOBA vs pitch mix"])
+    abs_map = {
+        "Avg EV (L3G)":       _ev_color,
+        "Avg LA (L3G)":       _la_color,
+        "Barrel%":            _barrel_color,
+        "HH%":                _hh_color,
+        "HH% vs pitch mix":   _hh_color,
+        "ISO vs pitch mix":   _iso_color,
+        "wOBA vs pitch mix":  _woba_color,
+        "xwOBA vs pitch mix": _woba_color,
+    }
+    for col, fn in abs_map.items():
+        if col in cols and df[col].notna().any():
+            styled = styled.map(fn, subset=[col])
 
     return styled
 
