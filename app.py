@@ -846,50 +846,50 @@ LOW_GOOD = ["K% vs pitch mix"]
 def _la_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if 25 <= v <= 35:                       return "background-color:#006400;color:white"
-    elif 15 <= v < 25 or 35 < v <= 45:     return "background-color:#ff9800;color:white"
-    else:                                   return "background-color:#9b0000;color:white"
+    if 25 <= v <= 35:                       return "background-color:#1a9641;color:white"
+    elif 15 <= v < 25 or 35 < v <= 45:     return "background-color:#fdae61;color:#1a1a1a"
+    else:                                   return "background-color:#d7191c;color:white"
 
 def _barrel_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v > 15:      return "background-color:#006400;color:white"
-    elif v >= 10:   return "background-color:#4caf50;color:white"
-    elif v >= 6:    return "background-color:#ff9800;color:white"
-    else:           return "background-color:#9b0000;color:white"
+    if v > 15:      return "background-color:#1a9641;color:white"
+    elif v >= 10:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 6:    return "background-color:#fdae61;color:#1a1a1a"
+    else:           return "background-color:#d7191c;color:white"
 
 def _ev_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v >= 100:    return "background-color:#006400;color:white"
-    elif v >= 95:   return "background-color:#4caf50;color:white"
-    elif v >= 90:   return "background-color:#ff9800;color:white"
-    else:           return "background-color:#9b0000;color:white"
+    if v >= 100:    return "background-color:#1a9641;color:white"
+    elif v >= 95:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 90:   return "background-color:#fdae61;color:#1a1a1a"
+    else:           return "background-color:#d7191c;color:white"
 
 def _hh_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v > 50:      return "background-color:#006400;color:white"
-    elif v >= 45:   return "background-color:#4caf50;color:white"
-    elif v >= 40:   return "background-color:#ff9800;color:white"
-    else:           return "background-color:#9b0000;color:white"
+    if v > 50:      return "background-color:#1a9641;color:white"
+    elif v >= 45:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
+    else:           return "background-color:#d7191c;color:white"
 
 def _iso_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v > 0.300:   return "background-color:#006400;color:white"
-    elif v > 0.250: return "background-color:#4caf50;color:white"
-    elif v > 0.200: return "background-color:#ff9800;color:white"
-    elif v > 0.160: return "background-color:#9b0000;color:white"
-    else:           return "background-color:#7f0000;color:white"
+    if v > 0.300:   return "background-color:#1a9641;color:white"
+    elif v > 0.250: return "background-color:#a6d96a;color:#1a1a1a"
+    elif v > 0.200: return "background-color:#fdae61;color:#1a1a1a"
+    elif v > 0.160: return "background-color:#d7191c;color:white"
+    else:           return "background-color:#d7191c;color:white"
 
 def _woba_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v > 0.400:               return "background-color:#006400;color:white"
-    elif 0.370 <= v <= 0.400:   return "background-color:#4caf50;color:white"
-    elif 0.340 <= v < 0.370:    return "background-color:#ff9800;color:white"
-    else:                       return "background-color:#9b0000;color:white"
+    if v > 0.400:               return "background-color:#1a9641;color:white"
+    elif 0.370 <= v <= 0.400:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif 0.340 <= v < 0.370:    return "background-color:#fdae61;color:#1a1a1a"
+    else:                       return "background-color:#d7191c;color:white"
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
