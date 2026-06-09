@@ -1124,13 +1124,18 @@ for g in selected_games:
         batter_hand_display = "R" if batting_team == g["away_team"] else "R"
         mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
 
+        # Get pitcher hand for display label
+        pr_row     = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher]
+        p_hand     = pr_row.iloc[0]["Pitcher hand"] if not pr_row.empty else "R"
+        hand_label = "LHP" if p_hand == "L" else "RHP"
+
         st.markdown(
             f"<div style='background:var(--color-background-secondary);"
             f"border-left:3px solid {border};"
             f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
             f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
             f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
-            f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {opp_pitcher}</span>"
+            f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {hand_label} {opp_pitcher}</span>"
             f"</div>"
             f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
             f"🎯 Pitch mix: {mix_str}</div>"
