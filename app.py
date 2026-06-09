@@ -1015,6 +1015,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     pitch_type_splits = fetch_pitch_type_splits(season)
     games_played      = fetch_games_played(season)
     player_hands      = fetch_player_hands(season)
+    st.sidebar.write("Hands:", len(player_hands), player_hands[["Player","bat_side","pitch_hand"]].head(3).to_dict() if not player_hands.empty else "EMPTY")
 
 # Qualified = 3.1 PA per team game played (MLB batting title standard)
 # We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
