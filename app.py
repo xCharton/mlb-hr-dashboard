@@ -93,6 +93,34 @@ def add_player_col(df: pd.DataFrame) -> pd.DataFrame:
         df["Player"] = df[name_col].apply(parse_savant_name)
     return df
 
+# ── Fetch player handedness from MLB people API ───────────────────────────────
+@st.cache_data(ttl=86400)
+def fetch_player_hands(season: int) -> pd.DataFrame:
+    """
+    Pulls bat side and pitch hand for all active players via the MLB people API.
+    Returns df with player_id, Player, bat_side, pitch_hand.
+    """
+    url = (
+        f"https://statsapi.mlb.com/api/v1/sports/1/players"
+        f"?season={season}&fields=people,id,fullName,batSide,pitchHand"
+    )
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        people = r.json().get("people", [])
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for p in people:
+        rows.append({
+            "player_id":   p.get("id"),
+            "Player":      p.get("fullName", "Unknown"),
+            "bat_side":    p.get("batSide", {}).get("code", "R"),
+            "pitch_hand":  p.get("pitchHand", {}).get("code", "R"),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
 # ── Fetch schedule ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_schedule(game_date: str):
@@ -783,10 +811,9 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
 
     rows = []
     for _, b in batters.iterrows():
-        # Determine batter hand: if they have vs L splits but no vs R, they're L-handed etc
-        has_vsr = b.get("HR (vs R)", None) is not None
-        has_vsl = b.get("HR (vs L)", None) is not None
-        batter_hand = "L" if has_vsl and not has_vsr else "R"
+        # Use bat_side from people API (accurate)
+        batter_hand = b.get("bat_side", "R")
+        hand_label  = "LHB" if batter_hand == "L" else "RHB"
 
         # Get all pitches thrown ≥18% vs this batter hand
         qual_pitches = get_qualifying_pitches(pitch_mix_by_hand, opp_pitcher, batter_hand)
@@ -796,8 +823,6 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             vals = [b.get(f"{stat_name} ({p})", None) for p in qual_pitches]
             vals = [v for v in vals if v is not None and not pd.isna(v)]
             return round(sum(vals) / len(vals), 3) if vals else None
-
-        hand_label = "LHB" if b.get("Batter hand", "R") == "L" else "RHB"
         row = {
             "Player":               f"{b['Player']} ({hand_label})",
             "Batting team":         TEAM_ABBREV.get(batting_team, batting_team),
@@ -977,6 +1002,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
     pitch_type_splits = fetch_pitch_type_splits(season)
     games_played      = fetch_games_played(season)
+    player_hands      = fetch_player_hands(season)
 
 # Qualified = 3.1 PA per team game played (MLB batting title standard)
 # We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
@@ -993,6 +1019,33 @@ if not games:
 
 with st.spinner("Loading full season hitting stats..."):
     hitting_df = fetch_season_stats(season)
+
+if not player_hands.empty:
+    # Merge bat side into hitting_df
+    if "player_id" in hitting_df.columns:
+        hitting_df = hitting_df.merge(
+            player_hands[["player_id", "bat_side"]],
+            on="player_id", how="left"
+        )
+    else:
+        hitting_df = hitting_df.merge(
+            player_hands[["Player", "bat_side"]],
+            on="Player", how="left"
+        )
+    if "bat_side" not in hitting_df.columns:
+        hitting_df["bat_side"] = "R"
+
+    # Merge pitch hand into pitcher_df
+    pitcher_df = pitcher_df.merge(
+        player_hands[["Player", "pitch_hand"]].rename(columns={"Player": "Pitcher"}),
+        on="Pitcher", how="left"
+    )
+    # Override the old Pitcher hand col with the accurate one
+    if "pitch_hand" in pitcher_df.columns:
+        pitcher_df["Pitcher hand"] = pitcher_df["pitch_hand"].fillna("R")
+        pitcher_df = pitcher_df.drop(columns=["pitch_hand"])
+else:
+    hitting_df["bat_side"] = "R"
 
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
