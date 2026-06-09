@@ -97,29 +97,41 @@ def add_player_col(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(ttl=86400)
 def fetch_player_hands(season: int) -> pd.DataFrame:
     """
-    Pulls bat side and pitch hand for all active players via the MLB people API.
-    Returns df with player_id, Player, bat_side, pitch_hand.
+    Pulls bat side and pitch hand for all players via the MLB people API.
+    Uses the stats endpoint which reliably includes batSide and pitchHand.
     """
-    url = (
-        f"https://statsapi.mlb.com/api/v1/sports/1/players"
-        f"?season={season}&fields=people,id,fullName,batSide,pitchHand"
-    )
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        people = r.json().get("people", [])
-    except Exception:
+    rows = []
+    # Pull from both hitting and pitching stats which include player hand info
+    for group in ["hitting", "pitching"]:
+        url = (
+            f"https://statsapi.mlb.com/api/v1/stats"
+            f"?stats=season&group={group}&gameType=R"
+            f"&season={season}&limit=2000"
+            f"&fields=stats,splits,player,fullName,id,batSide,pitchHand"
+        )
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            splits = r.json()["stats"][0]["splits"]
+        except Exception:
+            continue
+        for s in splits:
+            p = s.get("player", {})
+            pid = p.get("id")
+            if not pid:
+                continue
+            rows.append({
+                "player_id":  pid,
+                "Player":     p.get("fullName", "Unknown"),
+                "bat_side":   p.get("batSide",  {}).get("code", "R"),
+                "pitch_hand": p.get("pitchHand",{}).get("code", "R"),
+            })
+
+    if not rows:
         return pd.DataFrame()
 
-    rows = []
-    for p in people:
-        rows.append({
-            "player_id":   p.get("id"),
-            "Player":      p.get("fullName", "Unknown"),
-            "bat_side":    p.get("batSide", {}).get("code", "R"),
-            "pitch_hand":  p.get("pitchHand", {}).get("code", "R"),
-        })
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    df = pd.DataFrame(rows).drop_duplicates(subset=["player_id"])
+    return df
 
 # ── Fetch schedule ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
