@@ -97,41 +97,33 @@ def add_player_col(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(ttl=86400)
 def fetch_player_hands(season: int) -> pd.DataFrame:
     """
-    Pulls bat side and pitch hand for all players via the MLB people API.
-    Uses the stats endpoint which reliably includes batSide and pitchHand.
+    Pulls bat side and pitch hand using the MLB people endpoint
+    which reliably returns batSide and pitchHand for all players.
     """
-    rows = []
-    # Pull from both hitting and pitching stats which include player hand info
-    for group in ["hitting", "pitching"]:
-        url = (
-            f"https://statsapi.mlb.com/api/v1/stats"
-            f"?stats=season&group={group}&gameType=R"
-            f"&season={season}&limit=2000"
-            f"&fields=stats,splits,player,fullName,id,batSide,pitchHand"
-        )
-        try:
-            r = requests.get(url, timeout=15)
-            r.raise_for_status()
-            splits = r.json()["stats"][0]["splits"]
-        except Exception:
-            continue
-        for s in splits:
-            p = s.get("player", {})
-            pid = p.get("id")
-            if not pid:
-                continue
-            rows.append({
-                "player_id":  pid,
-                "Player":     p.get("fullName", "Unknown"),
-                "bat_side":   p.get("batSide",  {}).get("code", "R"),
-                "pitch_hand": p.get("pitchHand",{}).get("code", "R"),
-            })
-
-    if not rows:
+    url = (
+        f"https://statsapi.mlb.com/api/v1/sports/1/players"
+        f"?season={season}&gameType=R"
+    )
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        people = r.json().get("people", [])
+    except Exception:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows).drop_duplicates(subset=["player_id"])
-    return df
+    rows = []
+    for p in people:
+        pid = p.get("id")
+        if not pid:
+            continue
+        rows.append({
+            "player_id":  pid,
+            "Player":     p.get("fullName", "Unknown"),
+            "bat_side":   p.get("batSide",   {}).get("code", "R"),
+            "pitch_hand": p.get("pitchHand", {}).get("code", "R"),
+        })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 # ── Fetch schedule ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)
@@ -1015,7 +1007,6 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     pitch_type_splits = fetch_pitch_type_splits(season)
     games_played      = fetch_games_played(season)
     player_hands      = fetch_player_hands(season)
-    st.sidebar.write("Hands:", len(player_hands), player_hands[["Player","bat_side","pitch_hand"]].head(3).to_dict() if not player_hands.empty else "EMPTY")
 
 # Qualified = 3.1 PA per team game played (MLB batting title standard)
 # We use AB ≈ PA * 0.87 as a rough proxy since we store AB not PA
