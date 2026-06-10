@@ -828,20 +828,17 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             vals = [v for v in vals if v is not None and not pd.isna(v)]
             return round(sum(vals) / len(vals), 3) if vals else None
         row = {
-            "Player":               f"{b['Player']} ({hand_label})",
-            "Batting team":         TEAM_ABBREV.get(batting_team, batting_team),
-            "Opp pitcher":          opp_pitcher,
-            "HR":                   b["HR"],
-            "AB":                   b["AB"],
-            "SLG":                  b["SLG"],
-            f"HR ({split_label})":  b.get(f"HR ({split_label})", None),
-            f"SLG ({split_label})": b.get(f"SLG ({split_label})", None),
-            "Avg EV (L3G)":         b.get("Avg EV (L3G)", None),
-            "Avg LA (L3G)":         b.get("Avg LA", None),   # season from Savant
-            "FB% (L3G)":            b.get("FB% (L3G)", None),
-            "Matchup score":        None,
-            "_split_label":         split_label,
-            "_qual_pitches":        ",".join(qual_pitches) if qual_pitches else "",
+            "Player":        f"{b['Player']} ({hand_label})",
+            "Batting team":  TEAM_ABBREV.get(batting_team, batting_team),
+            "Opp pitcher":   opp_pitcher,
+            "HR":            b["HR"],
+            "AB":            b["AB"],
+            "SLG":           b["SLG"],
+            "Avg EV (L3G)":  b.get("Avg EV (L3G)", None),
+            "Avg LA (L3G)":  b.get("Avg LA", None),
+            "FB% (L3G)":     b.get("FB% (L3G)", None),
+            "Matchup score": None,
+            "_qual_pitches": ",".join(qual_pitches) if qual_pitches else "",
         }
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
@@ -854,8 +851,6 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
 BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
-    "HR (vs R)", "SLG (vs R)",
-    "HR (vs L)", "SLG (vs L)",
     "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
     "Barrel%", "HH%",
     "HH% vs pitch mix", "wOBA vs pitch mix",
@@ -867,7 +862,7 @@ BASE_DISPLAY_COLS = [
 HIGH_GOOD = [
     "FB% (L3G)",
     "HH% vs pitch mix",
-    "SLG", "SLG (vs R)", "SLG (vs L)", "Matchup score",
+    "SLG", "Matchup score",
 ]
 LOW_GOOD = ["K% vs pitch mix"]
 
@@ -933,8 +928,6 @@ def style_table(df: pd.DataFrame, cols: list):
         "ISO vs pitch mix":   "{:.3f}",
         "K% vs pitch mix":    "{:.1f}%",
         "SLG":                "{:.3f}",
-        "SLG (vs R)":         "{:.3f}",
-        "SLG (vs L)":         "{:.3f}",
         "Matchup score":      "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
@@ -1201,7 +1194,7 @@ for g in selected_games:
         )
         team_df = (
             full_df[full_df["_key"] == key]
-            .drop(columns=["_key", "_split_label", "_qual_pitches"], errors="ignore")
+            .drop(columns=["_key", "_qual_pitches"], errors="ignore")
             .sort_values("Matchup score", ascending=False)
             .reset_index(drop=True)
         )
@@ -1209,19 +1202,8 @@ for g in selected_games:
         if team_df.empty:
             st.info(f"No {batting_team} batters match current filters.")
         else:
-            # Show only the relevant split columns (vs R or vs L)
-            present_split = next(
-                (c.split("HR (")[1].rstrip(")") for c in team_df.columns
-                 if c.startswith("HR (vs")), None
-            )
-            dynamic_cols = [
-                c for c in BASE_DISPLAY_COLS if c in team_df.columns
-                and not (present_split and c in (
-                    f"HR (vs {'L' if present_split == 'R' else 'R'})",
-                    f"SLG (vs {'L' if present_split == 'R' else 'R'})"
-                ))
-            ]
-            st.dataframe(style_table(team_df, dynamic_cols), use_container_width=True, height=380, hide_index=True)
+            valid = [c for c in BASE_DISPLAY_COLS if c in team_df.columns]
+            st.dataframe(style_table(team_df, valid), use_container_width=True, height=380, hide_index=True)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
@@ -1230,7 +1212,7 @@ st.markdown("---")
 st.subheader("Top picks across today's slate")
 
 chart_df = (
-    full_df.drop(columns=["_key", "_split_label", "_qual_pitches"], errors="ignore")
+    full_df.drop(columns=["_key", "_qual_pitches"], errors="ignore")
     .sort_values("Matchup score", ascending=False)
     .reset_index(drop=True)
 )
