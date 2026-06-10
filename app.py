@@ -273,9 +273,10 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_angle":  "Avg LA",
         "ev95percent":    "HH%",
         "brl_percent":    "Barrel%",
+        "pull_percent":   "Pull Air%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%"] if c in df.columns]
+    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%", "Pull Air%"] if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -737,6 +738,7 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         "k_percent":        "K%",
         "slg":              "_slg",
         "ba":               "_ba",
+        "pull_percent":     "Pull Air%",
     }
     for col in stat_map:
         if col in df.columns:
@@ -798,7 +800,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
+STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Pull Air%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -842,7 +844,7 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         }
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
-        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO"]:
+        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO", "Pull Air%"]:
             row[f"{stat} vs pitch mix"] = avg_stat_vs_pitches(stat)
         rows.append(row)
     return rows
@@ -852,15 +854,16 @@ BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%",
+    "Barrel%", "HH%", "Pull Air%",
     "HH% vs pitch mix", "wOBA vs pitch mix",
-    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
+    "xwOBA vs pitch mix", "ISO vs pitch mix",
+    "Pull Air% vs pitch mix", "K% vs pitch mix",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
-    "FB% (L3G)",
+    "FB% (L3G)", "Pull Air%", "Pull Air% vs pitch mix",
     "HH% vs pitch mix",
     "SLG", "Matchup score",
 ]
@@ -922,7 +925,8 @@ def style_table(df: pd.DataFrame, cols: list):
         "FB% (L3G)":          "{:.1f}%",
         "Barrel%":            "{:.1f}%",
         "HH%":                "{:.1f}%",
-        "HH% vs pitch mix":   "{:.1f}%",
+        "Pull Air%":             "{:.1f}%",
+        "Pull Air% vs pitch mix":"{:.1f}%",
         "wOBA vs pitch mix":  "{:.3f}",
         "xwOBA vs pitch mix": "{:.3f}",
         "ISO vs pitch mix":   "{:.3f}",
