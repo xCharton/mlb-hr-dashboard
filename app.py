@@ -261,7 +261,6 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-        st.info(f"Savant main cols: {[c for c in df.columns if 'pull' in c.lower() or 'air' in c.lower()]}")
     except Exception:
         return pd.DataFrame()
 
@@ -274,16 +273,57 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         "avg_hit_angle":  "Avg LA",
         "ev95percent":    "HH%",
         "brl_percent":    "Barrel%",
-        "pull_percent":   "Pull Air%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%", "Pull Air%"] if c in df.columns]
+    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%"] if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["Player"])
 
-# ── Savant: SwStr% from whiff leaderboard ────────────────────────────────────
+# ── Savant: Pull Air% from spray direction leaderboard ───────────────────────
+@st.cache_data(ttl=3600)
+def fetch_savant_pull(season: int) -> pd.DataFrame:
+    """
+    Savant spray/direction leaderboard — pull_percent is pulled ball rate.
+    Tries multiple known endpoint variations.
+    """
+    urls = [
+        f"https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&id=pull_percent&sportId=1&season={season}&season_end={season}&min=50&csv=true",
+        f"https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&id=n_pull_percent&sportId=1&season={season}&season_end={season}&min=50&csv=true",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+        except Exception:
+            continue
+
+        if df.empty:
+            continue
+
+        name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
+        if not name_col:
+            continue
+        df["Player"] = df[name_col].apply(parse_savant_name)
+
+        # Find pull column — show debug so we can confirm
+        pull_col = next(
+            (c for c in df.columns if "pull" in c.lower()),
+            None
+        )
+        if not pull_col:
+            st.info(f"Pull endpoint cols: {list(df.columns[:20])}")
+            continue
+
+        df = df.rename(columns={pull_col: "Pull Air%"})
+        df["Pull Air%"] = pd.to_numeric(df["Pull Air%"], errors="coerce")
+        if df["Pull Air%"].dropna().max() <= 1.0:
+            df["Pull Air%"] = df["Pull Air%"] * 100
+        return df[["Player", "Pull Air%"]].dropna(subset=["Player"])
+
+    return pd.DataFrame()
 @st.cache_data(ttl=3600)
 def fetch_savant_swstr(season: int) -> pd.DataFrame:
     url = (
@@ -999,6 +1039,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
     sc_fb             = fetch_savant_fb(season)
+    sc_pull           = fetch_savant_pull(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
@@ -1054,7 +1095,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_fb]:
+for src in [sc_main, sc_barrels, sc_fb, sc_pull]:
     if src.empty:
         continue
     # Only merge columns not already in hitting_df to avoid duplicates
