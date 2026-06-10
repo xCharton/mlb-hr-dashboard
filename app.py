@@ -261,7 +261,7 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
-    st.info(f"Savant main cols: {[c for c in df.columns if 'pull' in c.lower() or 'air' in c.lower()]}")
+        st.info(f"Savant main cols: {[c for c in df.columns if 'pull' in c.lower() or 'air' in c.lower()]}")
     except Exception:
         return pd.DataFrame()
 
