@@ -864,7 +864,12 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         def avg_stat_vs_pitches(stat_name):
             vals = [b.get(f"{stat_name} ({p})", None) for p in qual_pitches]
             vals = [v for v in vals if v is not None and not pd.isna(v)]
-            return round(sum(vals) / len(vals), 3) if vals else None
+            if not vals:
+                return None
+            avg = sum(vals) / len(vals)
+            # Percentage stats round to 1dp, rate stats to 3dp
+            pct_stats = {"HH%", "K%"}
+            return round(avg, 1) if stat_name in pct_stats else round(avg, 3)
         row = {
             "Player":        f"{b['Player']} ({hand_label})",
             "Batting team":  TEAM_ABBREV.get(batting_team, batting_team),
