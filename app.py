@@ -770,15 +770,10 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # hard_hit_percent returns decimals (0.456 = 45.6%) — convert to %
-    if "hard_hit_percent" in df.columns:
-        if df["hard_hit_percent"].dropna().max() <= 1.0:
-            df["hard_hit_percent"] = df["hard_hit_percent"] * 100
-
-    # k_percent also returns decimals
-    if "k_percent" in df.columns:
-        if df["k_percent"].dropna().max() <= 1.0:
-            df["k_percent"] = df["k_percent"] * 100
+    # These cols always return decimals (0.456 = 45.6%) on this endpoint
+    for pct_col in ["hard_hit_percent", "k_percent"]:
+        if pct_col in df.columns:
+            df[pct_col] = df[pct_col] * 100
 
     # Pivot: one row per player, cols named Stat(PitchType)
     rows = {}
@@ -836,7 +831,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Pull Air%"]
+STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -880,11 +875,8 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         }
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
-        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO", "Pull Air%"]:
+        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO"]:
             val = avg_stat_vs_pitches(stat)
-            # Pull Air% fallback: use season value if no pitch-specific data
-            if val is None and stat == "Pull Air%":
-                val = b.get("Pull Air%", None)
             row[f"{stat} vs pitch mix"] = val
         rows.append(row)
     return rows
@@ -894,16 +886,15 @@ BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%", "Pull Air%",
+    "Barrel%", "HH%",
     "HH% vs pitch mix", "wOBA vs pitch mix",
-    "xwOBA vs pitch mix", "ISO vs pitch mix",
-    "Pull Air% vs pitch mix", "K% vs pitch mix",
+    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
-    "FB% (L3G)", "Pull Air%", "Pull Air% vs pitch mix",
+    "FB% (L3G)",
     "HH% vs pitch mix",
     "SLG", "Matchup score",
 ]
@@ -1038,7 +1029,6 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
     sc_fb             = fetch_savant_fb(season)
-    sc_pull           = fetch_savant_pull(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
@@ -1094,7 +1084,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_fb, sc_pull]:
+for src in [sc_main, sc_barrels, sc_fb]:
     if src.empty:
         continue
     # Only merge columns not already in hitting_df to avoid duplicates
