@@ -770,10 +770,13 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # These cols always return decimals (0.456 = 45.6%) on this endpoint
+    # hard_hit_percent and k_percent: convert to % only if stored as decimals
+    # Check median — if median < 1.0 they're decimals, if > 1.0 already percentages
     for pct_col in ["hard_hit_percent", "k_percent"]:
         if pct_col in df.columns:
-            df[pct_col] = df[pct_col] * 100
+            median = df[pct_col].dropna().median()
+            if median < 1.0:
+                df[pct_col] = df[pct_col] * 100
 
     # Pivot: one row per player, cols named Stat(PitchType)
     rows = {}
