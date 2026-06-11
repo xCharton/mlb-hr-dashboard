@@ -770,6 +770,16 @@ def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # hard_hit_percent returns decimals (0.456 = 45.6%) — convert to %
+    if "hard_hit_percent" in df.columns:
+        if df["hard_hit_percent"].dropna().max() <= 1.0:
+            df["hard_hit_percent"] = df["hard_hit_percent"] * 100
+
+    # k_percent also returns decimals
+    if "k_percent" in df.columns:
+        if df["k_percent"].dropna().max() <= 1.0:
+            df["k_percent"] = df["k_percent"] * 100
+
     # Pivot: one row per player, cols named Stat(PitchType)
     rows = {}
     for _, row in df.iterrows():
@@ -871,7 +881,11 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
         for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO", "Pull Air%"]:
-            row[f"{stat} vs pitch mix"] = avg_stat_vs_pitches(stat)
+            val = avg_stat_vs_pitches(stat)
+            # Pull Air% fallback: use season value if no pitch-specific data
+            if val is None and stat == "Pull Air%":
+                val = b.get("Pull Air%", None)
+            row[f"{stat} vs pitch mix"] = val
         rows.append(row)
     return rows
 
