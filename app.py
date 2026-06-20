@@ -583,10 +583,163 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
         hr_allowed = int(stat.get("homeRuns", 0) or 0)
         rows.append({
             "Pitcher":      player.get("fullName", "Unknown"),
+            "pitcher_id":   player.get("id"),
             "Pitcher hand": player.get("pitchHand", {}).get("code", "R"),
             "HR/9":         round(hr_allowed / ip * 9, 2) if ip > 0 else 0.0,
         })
     return pd.DataFrame(rows)
+
+# ── Pitcher last-10-starts game log (which gamePks were starts) ──────────────
+@st.cache_data(ttl=3600)
+def fetch_pitcher_starts(pitcher_id: int, season: int, n: int = 10) -> list:
+    """
+    Returns the pitcher's last n starts this season as a list of
+    {"game_pk": int, "date": "YYYY-MM-DD"} dicts, sorted oldest → newest.
+    Uses MLB Stats API gameLog so we can reliably tell starts apart from
+    relief appearances via the gamesStarted flag.
+    """
+    if not pitcher_id:
+        return []
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{int(pitcher_id)}/stats"
+        f"?stats=gameLog&group=pitching&gameType=R&season={season}"
+    )
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        splits = r.json()["stats"][0]["splits"]
+    except Exception:
+        return []
+
+    starts = []
+    for s in splits:
+        stat = s.get("stat", {})
+        try:
+            gs = int(stat.get("gamesStarted", 0) or 0)
+        except (TypeError, ValueError):
+            gs = 0
+        if gs != 1:
+            continue
+        game_pk   = s.get("game", {}).get("gamePk")
+        game_date = s.get("date")
+        if game_pk and game_date:
+            starts.append({"game_pk": game_pk, "date": game_date})
+
+    starts.sort(key=lambda x: x["date"])
+    return starts[-n:]
+
+# ── Pull pitch-level Statcast for one pitcher over a date window ─────────────
+@st.cache_data(ttl=3600)
+def fetch_pitcher_pitch_log(pitcher_id: int, season: int, date_min: str, date_max: str) -> pd.DataFrame:
+    """
+    Pulls raw pitch-by-pitch Statcast rows for this pitcher between date_min
+    and date_max (both padded by the caller). The caller is responsible for
+    filtering down to the exact game_pks they care about, since a pitcher may
+    have other appearances inside the same window.
+    """
+    url = (
+        f"https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&hfGT=R%7C&hfSea={season}%7C&player_type=pitcher"
+        f"&pitchers_lookup%5B%5D={int(pitcher_id)}"
+        f"&game_date_gt={date_min}&game_date_lt={date_max}"
+        f"&min_pitches=0&min_results=0&type=details&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+    return df
+
+# ── Aggregate last-10-starts metrics for one pitcher ──────────────────────────
+@st.cache_data(ttl=3600)
+def compute_last10_pitcher_metrics(pitcher_id: int, season: int) -> dict:
+    """
+    Builds xwOBA, CSW%, SwStr%, Ball%, Barrel/BBE%, FB%, and HH% allowed,
+    aggregated over the pitcher's last 10 starts, from raw Statcast pitches.
+    """
+    starts = fetch_pitcher_starts(pitcher_id, season, n=10)
+    if not starts:
+        return {}
+
+    game_pks = {s["game_pk"] for s in starts}
+    dates    = sorted(s["date"] for s in starts)
+    date_min = (pd.to_datetime(dates[0])  - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    date_max = (pd.to_datetime(dates[-1]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    df = fetch_pitcher_pitch_log(pitcher_id, season, date_min, date_max)
+    if df.empty or "game_pk" not in df.columns:
+        return {"Starts (L10)": len(starts), "Last start": dates[-1]}
+
+    df = df[df["game_pk"].isin(game_pks)].copy()
+    if df.empty:
+        return {"Starts (L10)": len(starts), "Last start": dates[-1]}
+
+    total_pitches = len(df)
+    desc = df["description"].astype(str) if "description" in df.columns else pd.Series(dtype=str)
+
+    csw_mask   = desc.isin(["called_strike", "swinging_strike", "swinging_strike_blocked"])
+    swstr_mask = desc.isin(["swinging_strike", "swinging_strike_blocked"])
+    ball_mask  = desc.isin(["ball", "blocked_ball", "pitchout"])
+
+    csw_pct   = round(csw_mask.mean()   * 100, 1) if total_pitches and not desc.empty else None
+    swstr_pct = round(swstr_mask.mean() * 100, 1) if total_pitches and not desc.empty else None
+    ball_pct  = round(ball_mask.mean()  * 100, 1) if total_pitches and not desc.empty else None
+
+    # Batted ball events (pitch result type "X" = ball put in play)
+    if "type" in df.columns:
+        bbe = df[df["type"] == "X"].copy()
+    elif "description" in df.columns:
+        bbe = df[desc == "hit_into_play"].copy()
+    else:
+        bbe = pd.DataFrame()
+
+    barrel_pct = hh_pct = fb_pct = None
+    if not bbe.empty:
+        if "launch_speed_angle" in bbe.columns:
+            barrels = pd.to_numeric(bbe["launch_speed_angle"], errors="coerce") == 6
+            barrel_pct = round(barrels.mean() * 100, 1)
+        if "launch_speed" in bbe.columns:
+            ls = pd.to_numeric(bbe["launch_speed"], errors="coerce")
+            valid_ls = ls.dropna()
+            if not valid_ls.empty:
+                hh_pct = round((valid_ls >= 95).mean() * 100, 1)
+        if "bb_type" in bbe.columns:
+            fb_pct = round((bbe["bb_type"] == "fly_ball").mean() * 100, 1)
+
+    # xwOBA: blend estimated_woba_using_speedangle (batted balls) with actual
+    # woba_value (K / BB / HBP, where there's no "expected" contact quality)
+    xwoba = None
+    if {"game_pk", "at_bat_number", "woba_value", "woba_denom"}.issubset(df.columns):
+        agg = {"woba_value": "max", "woba_denom": "max"}
+        if "estimated_woba_using_speedangle" in df.columns:
+            agg["estimated_woba_using_speedangle"] = "max"
+        pa = df.groupby(["game_pk", "at_bat_number"]).agg(agg).reset_index()
+        denom = pd.to_numeric(pa["woba_denom"], errors="coerce").fillna(0)
+        qualifying = pa[denom > 0].copy()
+        if not qualifying.empty:
+            act = pd.to_numeric(qualifying["woba_value"], errors="coerce")
+            if "estimated_woba_using_speedangle" in qualifying.columns:
+                est = pd.to_numeric(qualifying["estimated_woba_using_speedangle"], errors="coerce")
+                combined = est.where(est.notna(), act)
+            else:
+                combined = act
+            den = pd.to_numeric(qualifying["woba_denom"], errors="coerce").sum()
+            if den > 0:
+                xwoba = round(combined.sum() / den, 3)
+
+    return {
+        "Starts (L10)": len(starts),
+        "xwOBA":        xwoba,
+        "CSW%":         csw_pct,
+        "SwStr%":       swstr_pct,
+        "Ball%":        ball_pct,
+        "Barrel/BBE%":  barrel_pct,
+        "FB%":          fb_pct,
+        "HH%":          hh_pct,
+        "Last start":   dates[-1],
+    }
 
 # ── Fetch pitcher pitch mix by batter handedness ──────────────────────────────
 @st.cache_data(ttl=3600)
@@ -1003,6 +1156,128 @@ def style_table(df: pd.DataFrame, cols: list):
 
     return styled
 
+# ── Pitcher (last-10-starts) display + colour helpers ─────────────────────────
+PITCHER_DISPLAY_COLS = [
+    "Pitcher", "Team", "Hand", "Starts (L10)",
+    "xwOBA", "CSW%", "SwStr%", "Ball%",
+    "Barrel/BBE%", "FB%", "HH%", "Last start",
+]
+
+def _pitcher_xwoba_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v < 0.290:    return "background-color:#1a9641;color:white"
+    elif v < 0.310:  return "background-color:#a6d96a;color:#1a1a1a"
+    elif v < 0.330:  return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _csw_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v >= 32:      return "background-color:#1a9641;color:white"
+    elif v >= 29:    return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 26:    return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _swstr_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v >= 13:      return "background-color:#1a9641;color:white"
+    elif v >= 11:    return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 9:     return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _ball_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v <= 33:      return "background-color:#1a9641;color:white"
+    elif v <= 36:    return "background-color:#a6d96a;color:#1a1a1a"
+    elif v <= 39:    return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _barrel_allowed_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v < 6:        return "background-color:#1a9641;color:white"
+    elif v < 8:      return "background-color:#a6d96a;color:#1a1a1a"
+    elif v < 10:     return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _hh_allowed_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v < 33:       return "background-color:#1a9641;color:white"
+    elif v < 38:     return "background-color:#a6d96a;color:#1a1a1a"
+    elif v < 43:     return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def _fb_allowed_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v < 30:       return "background-color:#1a9641;color:white"
+    elif v < 36:     return "background-color:#a6d96a;color:#1a1a1a"
+    elif v < 42:     return "background-color:#fdae61;color:#1a1a1a"
+    else:            return "background-color:#d7191c;color:white"
+
+def style_pitcher_table(df: pd.DataFrame, cols: list):
+    fmt = {
+        "xwOBA":       "{:.3f}",
+        "CSW%":        "{:.1f}%",
+        "SwStr%":      "{:.1f}%",
+        "Ball%":       "{:.1f}%",
+        "Barrel/BBE%": "{:.1f}%",
+        "FB%":         "{:.1f}%",
+        "HH%":         "{:.1f}%",
+    }
+    fmt    = {k: v for k, v in fmt.items() if k in cols}
+    styled = df[cols].style.format(fmt, na_rep="—")
+
+    abs_map = {
+        "xwOBA":       _pitcher_xwoba_color,
+        "CSW%":        _csw_color,
+        "SwStr%":      _swstr_color,
+        "Ball%":       _ball_color,
+        "Barrel/BBE%": _barrel_allowed_color,
+        "FB%":         _fb_allowed_color,
+        "HH%":         _hh_allowed_color,
+    }
+    for col, fn in abs_map.items():
+        if col in cols and df[col].notna().any():
+            styled = styled.map(fn, subset=[col])
+
+    return styled
+
+def build_pitcher_last10_rows(g: dict, pitcher_df: pd.DataFrame,
+                               player_hands: pd.DataFrame, pitcher_id_map: dict,
+                               season: int) -> pd.DataFrame:
+    """One row per starting pitcher (away + home) for a single game."""
+    rows = []
+    for team_name, pname in [(g["away_team"], g["away_pitcher"]),
+                              (g["home_team"], g["home_pitcher"])]:
+        row = {"Pitcher": pname or "TBD", "Team": TEAM_ABBREV.get(team_name, team_name)}
+
+        if not pname or pname == "TBD":
+            row["Hand"] = "—"
+            rows.append(row)
+            continue
+
+        hand = None
+        pr_row = pitcher_df[pitcher_df["Pitcher"] == pname] if not pitcher_df.empty else pd.DataFrame()
+        if not pr_row.empty:
+            hand = pr_row.iloc[0].get("Pitcher hand")
+        if hand is None and not player_hands.empty:
+            ph_row = player_hands[player_hands["Player"] == pname]
+            if not ph_row.empty:
+                hand = ph_row.iloc[0].get("pitch_hand")
+        row["Hand"] = "LHP" if hand == "L" else "RHP"
+
+        pid = pitcher_id_map.get(pname)
+        if pid:
+            row.update(compute_last10_pitcher_metrics(int(pid), season))
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Settings")
@@ -1087,6 +1362,16 @@ if not player_hands.empty:
         pitcher_df = pitcher_df.drop(columns=["pitch_hand"])
 else:
     hitting_df["bat_side"] = "R"
+
+# ── Pitcher name → MLBAM id lookup (for last-10-starts Statcast pulls) ────────
+pitcher_id_map = {}
+if "pitcher_id" in pitcher_df.columns:
+    pitcher_id_map.update(
+        dict(zip(pitcher_df["Pitcher"], pitcher_df["pitcher_id"]))
+    )
+if not player_hands.empty and "player_id" in player_hands.columns:
+    for _, r in player_hands.iterrows():
+        pitcher_id_map.setdefault(r["Player"], r["player_id"])
 
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
@@ -1208,48 +1493,72 @@ for g in selected_games:
     )
     st.caption(f"{g['time']} · {g['venue']} · {pf_emoji} {pf_label} (PF {pf:.2f})")
 
-    for batting_team, border, opp_pitcher, key in [
-        (g["away_team"], "var(--color-border-info)",    g["home_pitcher"],
-         f"{g['away_team']}__{g['away_team']}@{g['home_team']}"),
-        (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
-         f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
-    ]:
-        # Determine batter hand for pitch mix display (opposite of pitcher hand)
-        batter_hand_display = "R" if batting_team == g["away_team"] else "R"
-        mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
+    tab_matchups, tab_pitchers = st.tabs(["📊 Batter matchups", "🎯 Starting pitchers"])
 
-        # Get pitcher hand for display label
-        pr_row     = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher]
-        p_hand     = pr_row.iloc[0]["Pitcher hand"] if not pr_row.empty else "R"
-        hand_label = "LHP" if p_hand == "L" else "RHP"
+    with tab_matchups:
+        for batting_team, border, opp_pitcher, key in [
+            (g["away_team"], "var(--color-border-info)",    g["home_pitcher"],
+             f"{g['away_team']}__{g['away_team']}@{g['home_team']}"),
+            (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
+             f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
+        ]:
+            # Determine batter hand for pitch mix display (opposite of pitcher hand)
+            batter_hand_display = "R" if batting_team == g["away_team"] else "R"
+            mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
 
-        st.markdown(
-            f"<div style='background:var(--color-background-secondary);"
-            f"border-left:3px solid {border};"
-            f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
-            f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
-            f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {hand_label} {opp_pitcher}</span>"
-            f"</div>"
-            f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
-            f"🎯 Pitch mix: {mix_str}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
+            # Get pitcher hand for display label
+            pr_row     = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher]
+            p_hand     = pr_row.iloc[0]["Pitcher hand"] if not pr_row.empty else "R"
+            hand_label = "LHP" if p_hand == "L" else "RHP"
+
+            st.markdown(
+                f"<div style='background:var(--color-background-secondary);"
+                f"border-left:3px solid {border};"
+                f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
+                f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
+                f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {hand_label} {opp_pitcher}</span>"
+                f"</div>"
+                f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
+                f"🎯 Pitch mix: {mix_str}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            team_df = (
+                full_df[full_df["_key"] == key]
+                .drop(columns=["_key", "_qual_pitches"], errors="ignore")
+                .sort_values("Matchup score", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            if team_df.empty:
+                st.info(f"No {batting_team} batters match current filters.")
+            else:
+                valid = [c for c in BASE_DISPLAY_COLS if c in team_df.columns]
+                st.dataframe(style_table(team_df, valid), use_container_width=True, height=380, hide_index=True)
+
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    with tab_pitchers:
+        st.caption(
+            "Last 10 starts · pitch-level Statcast. xwOBA / CSW% / SwStr% / Ball% are "
+            "computed per pitch thrown; Barrel/BBE%, FB%, and HH% allowed are computed "
+            "per batted-ball event."
         )
-        team_df = (
-            full_df[full_df["_key"] == key]
-            .drop(columns=["_key", "_qual_pitches"], errors="ignore")
-            .sort_values("Matchup score", ascending=False)
-            .reset_index(drop=True)
+        with st.spinner("Loading last 10 starts for both pitchers..."):
+            pitcher_table = build_pitcher_last10_rows(
+                g, pitcher_df, player_hands, pitcher_id_map, season
+            )
+        for col in ["Starts (L10)", "xwOBA", "CSW%", "SwStr%", "Ball%",
+                    "Barrel/BBE%", "FB%", "HH%", "Last start"]:
+            if col not in pitcher_table.columns:
+                pitcher_table[col] = None
+        valid_p = [c for c in PITCHER_DISPLAY_COLS if c in pitcher_table.columns]
+        st.dataframe(
+            style_pitcher_table(pitcher_table, valid_p),
+            use_container_width=True, hide_index=True,
         )
 
-        if team_df.empty:
-            st.info(f"No {batting_team} batters match current filters.")
-        else:
-            valid = [c for c in BASE_DISPLAY_COLS if c in team_df.columns]
-            st.dataframe(style_table(team_df, valid), use_container_width=True, height=380, hide_index=True)
-
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 # ── Top picks chart ────────────────────────────────────────────────────────────
 st.markdown("---")
@@ -1305,5 +1614,8 @@ st.markdown("---")
 st.caption(
     "Data: MLB Stats API + Baseball Savant Statcast · "
     "Park factors are multi-year estimates · "
-    "Probable pitchers from MLB schedule API · Bet responsibly."
+    "Probable pitchers from MLB schedule API · "
+    "Pitcher tab stats are computed from raw pitch-level Statcast data over each "
+    "starter's last 10 starts (xwOBA is approximated, not Savant's exact figure) · "
+    "Bet responsibly."
 )
