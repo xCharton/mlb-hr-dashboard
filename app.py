@@ -1020,7 +1020,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%"]
+STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Ideal Attack Angle%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -1454,6 +1454,7 @@ else:
 # Status banner
 failed = []
 if sc_main.empty: failed.append("HH%")
+if sc_attack_angle.empty: failed.append("Ideal Attack Angle%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
 
