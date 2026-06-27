@@ -463,6 +463,106 @@ def fetch_savant_attack_angle(season: int) -> pd.DataFrame:
     df["Ideal Attack Angle%"] = pd.to_numeric(df["ideal_attack_angle_rate"], errors="coerce") * 100
     return df[["Player", "Ideal Attack Angle%"]].dropna(subset=["Player"])
 
+# ── Last 7 days: league-wide raw Statcast → Barrel%, HH%, Pull%, Ideal Attack ──
+# ── Angle%, and SLG, computed by hand since Savant's leaderboards only expose ──
+# ── season-level (seasonStart/seasonEnd) windows, not arbitrary day ranges. ───
+AB_EVENTS = {
+    "single", "double", "triple", "home_run",
+    "strikeout", "strikeout_double_play",
+    "field_out", "force_out", "grounded_into_double_play", "double_play", "triple_play",
+    "fielders_choice", "fielders_choice_out", "field_error", "other_out",
+}
+TB_MAP = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
+# Fielding positions on a batter's pull side: 3B/SS/LF for a RHB, 1B/2B/RF for a LHB
+PULL_POSITIONS = {"R": {5, 6, 7}, "L": {3, 4, 9}}
+
+@st.cache_data(ttl=3600)
+def fetch_last7d_batter_stats(end_date: str) -> pd.DataFrame:
+    """
+    Pulls every league-wide pitch thrown to a batter over the 7 days ending on
+    end_date, then derives per-player Barrel%, HH%, Pull%, Ideal Attack Angle%,
+    and SLG from the raw rows:
+      - Barrel%   = launch_speed_angle == 6, over batted-ball events (type == "X")
+      - HH%       = launch_speed >= 95, over batted-ball events
+      - Pull%     = hit_location on the batter's pull side (per "stand"), over BBE
+      - Ideal AA% = attack_angle between 5° and 20°, over tracked swings
+      - SLG       = total bases / at-bats, derived from the "events" column
+    """
+    end_dt   = pd.to_datetime(end_date)
+    date_min = (end_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    date_max = (end_dt + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    url = (
+        f"https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&hfGT=R%7C&player_type=batter"
+        f"&game_date_gt={date_min}&game_date_lt={date_max}"
+        f"&min_pitches=0&min_results=0&type=details&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    name_col = next(
+        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
+        None
+    )
+    if not name_col:
+        return pd.DataFrame()
+    df["Player"] = df[name_col].apply(parse_savant_name)
+
+    rows = []
+    for player, g in df.groupby("Player"):
+        bat_side = g["stand"].mode().iat[0] if "stand" in g.columns and not g["stand"].dropna().empty else "R"
+
+        bbe   = g[g["type"] == "X"] if "type" in g.columns else pd.DataFrame()
+        n_bbe = len(bbe)
+
+        barrel_pct = hh_pct = pull_pct = None
+        if n_bbe > 0:
+            if "launch_speed_angle" in bbe.columns:
+                barrel_pct = round((pd.to_numeric(bbe["launch_speed_angle"], errors="coerce") == 6).mean() * 100, 1)
+            if "launch_speed" in bbe.columns:
+                ls = pd.to_numeric(bbe["launch_speed"], errors="coerce").dropna()
+                if not ls.empty:
+                    hh_pct = round((ls >= 95).mean() * 100, 1)
+            if "hit_location" in bbe.columns:
+                loc = pd.to_numeric(bbe["hit_location"], errors="coerce").dropna()
+                if not loc.empty:
+                    pull_set = PULL_POSITIONS.get(bat_side, PULL_POSITIONS["R"])
+                    pull_pct = round(loc.isin(pull_set).mean() * 100, 1)
+
+        attack_pct = None
+        if "attack_angle" in g.columns:
+            aa = pd.to_numeric(g["attack_angle"], errors="coerce").dropna()
+            if not aa.empty:
+                attack_pct = round(((aa >= 5) & (aa <= 20)).mean() * 100, 1)
+
+        slg = None
+        if "events" in g.columns:
+            pa      = g.dropna(subset=["events"])
+            ab_rows = pa[pa["events"].isin(AB_EVENTS)]
+            ab      = len(ab_rows)
+            if ab > 0:
+                tb  = sum(TB_MAP.get(e, 0) for e in ab_rows["events"])
+                slg = round(tb / ab, 3)
+
+        rows.append({
+            "Player":              player,
+            "Barrel%":             barrel_pct,
+            "HH%":                 hh_pct,
+            "Pull%":               pull_pct,
+            "Ideal Attack Angle%": attack_pct,
+            "SLG":                 slg,
+        })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
 # ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
 # Note: MLB Stats API game logs do not include exit velocity or launch angle.
 # FB% is computed from airOuts/atBats from each player's individual game log.
@@ -1020,7 +1120,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Ideal Attack Angle%"]
+STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Ideal Attack Angle%", "Pull%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -1080,13 +1180,13 @@ BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%", "Ideal Attack Angle%",
+    "Barrel%", "HH%", "Ideal Attack Angle%", "Pull%",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
-    "FB% (L3G)", "Ideal Attack Angle%",
+    "FB% (L3G)", "Ideal Attack Angle%", "Pull%",
     "SLG", "Matchup score",
 ]
 LOW_GOOD = []
@@ -1131,6 +1231,14 @@ def _attack_angle_color(val):
     elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
     else:           return "background-color:#d7191c;color:white"
 
+def _pull_color(val):
+    try: v = float(val)
+    except (TypeError, ValueError): return ""
+    if v >= 45:     return "background-color:#1a9641;color:white"
+    elif v >= 38:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 30:   return "background-color:#fdae61;color:#1a1a1a"
+    else:           return "background-color:#d7191c;color:white"
+
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
         "Avg EV (L3G)":         "{:.1f}",
@@ -1139,6 +1247,7 @@ def style_table(df: pd.DataFrame, cols: list):
         "Barrel%":              "{:.1f}%",
         "HH%":                  "{:.1f}%",
         "Ideal Attack Angle%":  "{:.1f}%",
+        "Pull%":                "{:.1f}%",
         "SLG":                  "{:.3f}",
         "Matchup score":        "{:.1f}",
     }
@@ -1161,6 +1270,7 @@ def style_table(df: pd.DataFrame, cols: list):
         "Barrel%":             _barrel_color,
         "HH%":                 _hh_color,
         "Ideal Attack Angle%": _attack_angle_color,
+        "Pull%":               _pull_color,
     }
     for col, fn in abs_map.items():
         if col in cols and df[col].notna().any():
@@ -1314,8 +1424,9 @@ with st.sidebar:
     st.caption("• K% vs pitch mix — 5% (lower = better)")
     st.markdown("---")
     st.markdown("**Data sources**")
-    st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
-    st.caption("Baseball Savant — EV, HH%, Barrel%, Ideal Attack Angle%, pitch mix, vs pitch type")
+    st.caption("MLB Stats API — HR, schedule, pitchers, splits")
+    st.caption("Baseball Savant — EV, pitch mix, vs pitch type")
+    st.caption("Barrel%, HH%, Ideal Attack Angle%, Pull%, and SLG reflect the last 7 days (falls back to season stats if a player has no batted balls in that window)")
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -1326,6 +1437,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_barrels        = fetch_savant_barrels(season)
     sc_fb             = fetch_savant_fb(season)
     sc_attack_angle   = fetch_savant_attack_angle(season)
+    sc_last7d         = fetch_last7d_batter_stats(date_str)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
@@ -1400,6 +1512,27 @@ for src in [sc_main, sc_barrels, sc_fb, sc_attack_angle]:
         continue
     hitting_df = hitting_df.merge(src[new_cols], on="Player", how="left")
 
+# ── Overwrite Barrel%, HH%, Ideal Attack Angle%, and SLG with last-7-days
+# values (falling back to the season-long figure above when a player has no
+# batted-ball data in the window), and add Pull% — last 7 days only, there's
+# no full-season equivalent already on the page.
+L7D_OVERWRITE_COLS = ["Barrel%", "HH%", "Pull%", "Ideal Attack Angle%", "SLG"]
+if not sc_last7d.empty:
+    rename_map = {c: f"{c} (L7D)" for c in L7D_OVERWRITE_COLS if c in sc_last7d.columns}
+    l7d = sc_last7d.rename(columns=rename_map)
+    hitting_df = hitting_df.merge(
+        l7d[["Player"] + list(rename_map.values())], on="Player", how="left"
+    )
+    for orig, renamed in rename_map.items():
+        if orig in hitting_df.columns:
+            hitting_df[orig] = hitting_df[renamed].combine_first(hitting_df[orig])
+        else:
+            hitting_df[orig] = hitting_df[renamed]
+        hitting_df = hitting_df.drop(columns=[renamed])
+
+if "Pull%" not in hitting_df.columns:
+    hitting_df["Pull%"] = None
+
 if not splits_df.empty:
     new_cols = [c for c in splits_df.columns if c not in hitting_df.columns or c == "Player"]
     if len(new_cols) > 1:
@@ -1457,6 +1590,12 @@ if sc_main.empty: failed.append("HH%")
 if sc_attack_angle.empty: failed.append("Ideal Attack Angle%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
+
+if sc_last7d.empty:
+    st.info(
+        "ℹ️ Could not load last-7-days Statcast — Barrel%, HH%, Ideal Attack Angle%, "
+        "and SLG are showing full-season stats instead, and Pull% shows '—'."
+    )
 
 # ── Game selector ──────────────────────────────────────────────────────────────
 st.subheader("Filter by game")
