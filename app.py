@@ -432,6 +432,37 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     df["Barrel%"] = pd.to_numeric(df["Barrel%"], errors="coerce")
     return df.dropna(subset=["Player"])
 
+# ── Savant: Ideal Attack Angle% from bat-tracking swing-path leaderboard ─────
+@st.cache_data(ttl=3600)
+def fetch_savant_attack_angle(season: int) -> pd.DataFrame:
+    """
+    Confirmed endpoint: /leaderboard/bat-tracking/swing-path-attack-angle
+                         ?seasonStart={season}&seasonEnd={season}&type=batter&csv=true
+    Confirmed col: ideal_attack_angle_rate (decimal — multiply by 100 for %)
+    Name col: "name" in "Last, First" format
+    """
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/bat-tracking/swing-path-attack-angle"
+        f"?seasonStart={season}&seasonEnd={season}&type=batter&minSwings=1&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty or "ideal_attack_angle_rate" not in df.columns:
+        return pd.DataFrame()
+
+    name_col = next((c for c in df.columns if c.lower() == "name"), None)
+    if not name_col:
+        return pd.DataFrame()
+
+    df["Player"] = df[name_col].apply(parse_savant_name)
+    df["Ideal Attack Angle%"] = pd.to_numeric(df["ideal_attack_angle_rate"], errors="coerce") * 100
+    return df[["Player", "Ideal Attack Angle%"]].dropna(subset=["Player"])
+
 # ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
 # Note: MLB Stats API game logs do not include exit velocity or launch angle.
 # FB% is computed from airOuts/atBats from each player's individual game log.
@@ -1049,19 +1080,16 @@ BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%",
-    "HH% vs pitch mix", "wOBA vs pitch mix",
-    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
+    "Barrel%", "HH%", "Ideal Attack Angle%",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
-    "FB% (L3G)",
-    "HH% vs pitch mix",
+    "FB% (L3G)", "Ideal Attack Angle%",
     "SLG", "Matchup score",
 ]
-LOW_GOOD = ["K% vs pitch mix"]
+LOW_GOOD = []
 
 # ── Absolute threshold colour helpers ─────────────────────────────────────────
 def _la_color(val):
@@ -1095,37 +1123,24 @@ def _hh_color(val):
     elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
     else:           return "background-color:#d7191c;color:white"
 
-def _iso_color(val):
+def _attack_angle_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
-    if v > 0.300:   return "background-color:#1a9641;color:white"
-    elif v > 0.250: return "background-color:#a6d96a;color:#1a1a1a"
-    elif v > 0.200: return "background-color:#fdae61;color:#1a1a1a"
-    elif v > 0.160: return "background-color:#d7191c;color:white"
+    if v >= 60:     return "background-color:#1a9641;color:white"
+    elif v >= 50:   return "background-color:#a6d96a;color:#1a1a1a"
+    elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
     else:           return "background-color:#d7191c;color:white"
-
-def _woba_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v > 0.400:               return "background-color:#1a9641;color:white"
-    elif 0.370 <= v <= 0.400:   return "background-color:#a6d96a;color:#1a1a1a"
-    elif 0.340 <= v < 0.370:    return "background-color:#fdae61;color:#1a1a1a"
-    else:                       return "background-color:#d7191c;color:white"
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
-        "Avg EV (L3G)":       "{:.1f}",
-        "Avg LA (L3G)":       "{:.1f}°",
-        "FB% (L3G)":          "{:.1f}%",
-        "Barrel%":            "{:.1f}%",
-        "HH%":                "{:.1f}%",
-        "HH% vs pitch mix":   "{:.1f}%",
-        "wOBA vs pitch mix":  "{:.3f}",
-        "xwOBA vs pitch mix": "{:.3f}",
-        "ISO vs pitch mix":   "{:.3f}",
-        "K% vs pitch mix":    "{:.1f}%",
-        "SLG":                "{:.3f}",
-        "Matchup score":      "{:.1f}",
+        "Avg EV (L3G)":         "{:.1f}",
+        "Avg LA (L3G)":         "{:.1f}°",
+        "FB% (L3G)":            "{:.1f}%",
+        "Barrel%":              "{:.1f}%",
+        "HH%":                  "{:.1f}%",
+        "Ideal Attack Angle%":  "{:.1f}%",
+        "SLG":                  "{:.3f}",
+        "Matchup score":        "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
@@ -1141,14 +1156,11 @@ def style_table(df: pd.DataFrame, cols: list):
 
     # Absolute threshold cols
     abs_map = {
-        "Avg EV (L3G)":       _ev_color,
-        "Avg LA (L3G)":       _la_color,
-        "Barrel%":            _barrel_color,
-        "HH%":                _hh_color,
-        "HH% vs pitch mix":   _hh_color,
-        "ISO vs pitch mix":   _iso_color,
-        "wOBA vs pitch mix":  _woba_color,
-        "xwOBA vs pitch mix": _woba_color,
+        "Avg EV (L3G)":        _ev_color,
+        "Avg LA (L3G)":        _la_color,
+        "Barrel%":             _barrel_color,
+        "HH%":                 _hh_color,
+        "Ideal Attack Angle%": _attack_angle_color,
     }
     for col, fn in abs_map.items():
         if col in cols and df[col].notna().any():
@@ -1303,7 +1315,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
-    st.caption("Baseball Savant — EV, HH%, Barrel%, pitch mix, vs pitch type")
+    st.caption("Baseball Savant — EV, HH%, Barrel%, Ideal Attack Angle%, pitch mix, vs pitch type")
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -1313,6 +1325,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
     sc_fb             = fetch_savant_fb(season)
+    sc_attack_angle   = fetch_savant_attack_angle(season)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
@@ -1378,7 +1391,7 @@ if hitting_df.empty:
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_fb]:
+for src in [sc_main, sc_barrels, sc_fb, sc_attack_angle]:
     if src.empty:
         continue
     # Only merge columns not already in hitting_df to avoid duplicates
