@@ -249,7 +249,7 @@ def fetch_last_n_games(team_id: int, season: int, n_games: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-# ── Savant: main leaderboard — HH%, Avg EV, Avg LA, SweetSpot% ───────────────
+# ── Savant: main leaderboard — HH%, Barrel% ──────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_savant_main(season: int) -> pd.DataFrame:
     url = (
@@ -269,13 +269,12 @@ def fetch_savant_main(season: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     rename = {
-        "avg_hit_speed":  "Avg EV",
-        "avg_hit_angle":  "Avg LA",
+
         "ev95percent":    "HH%",
         "brl_percent":    "Barrel%",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    keep = ["Player"] + [c for c in ["Avg EV", "Avg LA", "HH%", "Barrel%"] if c in df.columns]
+    keep = ["Player"] + [c for c in ["HH%", "Barrel%"] if c in df.columns]
     df   = df[keep].copy()
     for col in keep[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -432,260 +431,6 @@ def fetch_savant_barrels(season: int) -> pd.DataFrame:
     df["Barrel%"] = pd.to_numeric(df["Barrel%"], errors="coerce")
     return df.dropna(subset=["Player"])
 
-# ── Savant: Ideal Attack Angle% from bat-tracking swing-path leaderboard ─────
-@st.cache_data(ttl=3600)
-def fetch_savant_attack_angle(season: int) -> pd.DataFrame:
-    """
-    Confirmed endpoint: /leaderboard/bat-tracking/swing-path-attack-angle
-                         ?seasonStart={season}&seasonEnd={season}&type=batter&csv=true
-    Confirmed col: ideal_attack_angle_rate (decimal — multiply by 100 for %)
-    Name col: "name" in "Last, First" format
-    """
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/bat-tracking/swing-path-attack-angle"
-        f"?seasonStart={season}&seasonEnd={season}&type=batter&minSwings=1&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or "ideal_attack_angle_rate" not in df.columns:
-        return pd.DataFrame()
-
-    name_col = next((c for c in df.columns if c.lower() == "name"), None)
-    if not name_col:
-        return pd.DataFrame()
-
-    df["Player"] = df[name_col].apply(parse_savant_name)
-    df["Ideal Attack Angle%"] = pd.to_numeric(df["ideal_attack_angle_rate"], errors="coerce") * 100
-    return df[["Player", "Ideal Attack Angle%"]].dropna(subset=["Player"])
-
-# ── Last 7 days: league-wide raw Statcast → Barrel%, HH%, Pull%, Ideal Attack ──
-# ── Angle%, and SLG, computed by hand since Savant's leaderboards only expose ──
-# ── season-level (seasonStart/seasonEnd) windows, not arbitrary day ranges. ───
-AB_EVENTS = {
-    "single", "double", "triple", "home_run",
-    "strikeout", "strikeout_double_play",
-    "field_out", "force_out", "grounded_into_double_play", "double_play", "triple_play",
-    "fielders_choice", "fielders_choice_out", "field_error", "other_out",
-}
-TB_MAP = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
-# Fielding positions on a batter's pull side: 3B/SS/LF for a RHB, 1B/2B/RF for a LHB
-PULL_POSITIONS = {"R": {5, 6, 7}, "L": {3, 4, 9}}
-
-@st.cache_data(ttl=3600)
-def fetch_last7d_batter_stats(end_date: str) -> pd.DataFrame:
-    """
-    Pulls every league-wide pitch thrown to a batter over the 7 days ending on
-    end_date, then derives per-player Barrel%, HH%, Pull%, Ideal Attack Angle%,
-    and SLG from the raw rows:
-      - Barrel%   = launch_speed_angle == 6, over batted-ball events (type == "X")
-      - HH%       = launch_speed >= 95, over batted-ball events
-      - Pull%     = hit_location on the batter's pull side (per "stand"), over BBE
-      - Ideal AA% = attack_angle between 5° and 20°, over tracked swings
-      - SLG       = total bases / at-bats, derived from the "events" column
-    """
-    end_dt   = pd.to_datetime(end_date)
-    date_min = (end_dt - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-    date_max = (end_dt + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-
-    url = (
-        f"https://baseballsavant.mlb.com/statcast_search/csv"
-        f"?all=true&hfGT=R%7C&player_type=batter"
-        f"&game_date_gt={date_min}&game_date_lt={date_max}"
-        f"&min_pitches=0&min_results=0&type=details&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    name_col = next(
-        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
-        None
-    )
-    if not name_col:
-        return pd.DataFrame()
-    df["Player"] = df[name_col].apply(parse_savant_name)
-
-    rows = []
-    for player, g in df.groupby("Player"):
-        bat_side = g["stand"].mode().iat[0] if "stand" in g.columns and not g["stand"].dropna().empty else "R"
-
-        bbe   = g[g["type"] == "X"] if "type" in g.columns else pd.DataFrame()
-        n_bbe = len(bbe)
-
-        barrel_pct = hh_pct = pull_pct = None
-        if n_bbe > 0:
-            if "launch_speed_angle" in bbe.columns:
-                barrel_pct = round((pd.to_numeric(bbe["launch_speed_angle"], errors="coerce") == 6).mean() * 100, 1)
-            if "launch_speed" in bbe.columns:
-                ls = pd.to_numeric(bbe["launch_speed"], errors="coerce").dropna()
-                if not ls.empty:
-                    hh_pct = round((ls >= 95).mean() * 100, 1)
-            if "hit_location" in bbe.columns:
-                loc = pd.to_numeric(bbe["hit_location"], errors="coerce").dropna()
-                if not loc.empty:
-                    pull_set = PULL_POSITIONS.get(bat_side, PULL_POSITIONS["R"])
-                    pull_pct = round(loc.isin(pull_set).mean() * 100, 1)
-
-        attack_pct = None
-        if "attack_angle" in g.columns:
-            aa = pd.to_numeric(g["attack_angle"], errors="coerce").dropna()
-            if not aa.empty:
-                attack_pct = round(((aa >= 5) & (aa <= 20)).mean() * 100, 1)
-
-        slg = None
-        if "events" in g.columns:
-            pa      = g.dropna(subset=["events"])
-            ab_rows = pa[pa["events"].isin(AB_EVENTS)]
-            ab      = len(ab_rows)
-            if ab > 0:
-                tb  = sum(TB_MAP.get(e, 0) for e in ab_rows["events"])
-                slg = round(tb / ab, 3)
-
-        rows.append({
-            "Player":              player,
-            "Barrel%":             barrel_pct,
-            "HH%":                 hh_pct,
-            "Pull%":               pull_pct,
-            "Ideal Attack Angle%": attack_pct,
-            "SLG":                 slg,
-        })
-
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-# ── Last 3 games FB% from MLB game log, EV/LA from Savant season leaderboard ──
-# Note: MLB Stats API game logs do not include exit velocity or launch angle.
-# FB% is computed from airOuts/atBats from each player's individual game log.
-@st.cache_data(ttl=1800)
-def fetch_last3_fb(team_id: int, season: int) -> pd.DataFrame:
-    """
-    1. Gets active roster for the team
-    2. For each player, fetches their game log and takes last 3 games
-    3. Computes FB% = airOuts / atBats * 100
-    """
-    # Step 1 — get roster
-    roster_url = (
-        f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster"
-        f"?rosterType=active&season={season}"
-    )
-    try:
-        r = requests.get(roster_url, timeout=10)
-        r.raise_for_status()
-        players = r.json().get("roster", [])
-    except Exception:
-        return pd.DataFrame()
-
-    rows = []
-    for p in players:
-        pid  = p.get("person", {}).get("id")
-        name = p.get("person", {}).get("fullName", "Unknown")
-        if not pid:
-            continue
-
-        # Step 2 — get this player's game log
-        log_url = (
-            f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
-            f"?stats=gameLog&group=hitting&gameType=R&season={season}"
-        )
-        try:
-            r2 = requests.get(log_url, timeout=10)
-            r2.raise_for_status()
-            splits = r2.json()["stats"][0]["splits"]
-        except Exception:
-            continue
-
-        if not splits:
-            continue
-
-        # Step 3 — last 3 games
-        last3 = splits[-3:]
-        fly_balls    = sum(int(s.get("stat", {}).get("airOuts", 0) or 0) for s in last3)
-        total_batted = sum(int(s.get("stat", {}).get("atBats",  0) or 0) for s in last3)
-        fb_pct = round(fly_balls / total_batted * 100, 1) if total_batted > 0 else None
-
-        rows.append({"Player": name, "FB% (L3G)": fb_pct})
-
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-# ── Last 3 games EV from Savant Statcast search ───────────────────────────────
-@st.cache_data(ttl=1800)
-def fetch_last3_ev_savant(team_id: int, season: int) -> pd.DataFrame:
-    """
-    Gets last 3 completed game dates for a team, then pulls individual
-    Statcast batted ball events from Savant and averages EV per player.
-    """
-    sched_url = (
-        f"https://statsapi.mlb.com/api/v1/schedule"
-        f"?sportId=1&teamId={team_id}&season={season}"
-        f"&gameType=R&fields=dates,date,games,status,abstractGameState"
-    )
-    try:
-        r = requests.get(sched_url, timeout=10)
-        r.raise_for_status()
-        dates_data = r.json().get("dates", [])
-    except Exception:
-        return pd.DataFrame()
-
-    played = sorted(
-        [d["date"] for d in dates_data
-         if any(g.get("status", {}).get("abstractGameState") == "Final"
-                for g in d.get("games", []))],
-        reverse=True
-    )[:3]
-
-    if not played:
-        return pd.DataFrame()
-
-    start_date = played[-1]
-    end_date   = played[0]
-
-    url = (
-        f"https://baseballsavant.mlb.com/statcast_search/csv"
-        f"?all=true&hfGT=R%7C&hfSea={season}%7C&player_type=batter"
-        f"&hfAB=single%7Cdouble%7Ctriple%7Chome_run%7Cfield_out%7Cgrounded_into_double_play"
-        f"%7Cforce_out%7Cfield_error%7Csac_fly%7Csac_bunt%7Cdouble_play%7Ctriple_play%7C"
-        f"&game_date_gt={start_date}&game_date_lt={end_date}"
-        f"&team={team_id}&min_results=0&type=details&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or "launch_speed" not in df.columns:
-        return pd.DataFrame()
-
-    name_col = next(
-        (c for c in df.columns if c.lower() in ("player_name", "batter_name", "batter")),
-        None
-    )
-    if not name_col:
-        return pd.DataFrame()
-
-    df["Player"] = df[name_col].apply(
-        lambda x: " ".join(reversed([p.strip() for p in str(x).split(",")])) if "," in str(x) else str(x)
-    )
-    df["launch_speed"] = pd.to_numeric(df["launch_speed"], errors="coerce")
-    df = df[df["launch_speed"] > 0]  # drop nulls and any zero readings
-
-    return (
-        df.groupby("Player")["launch_speed"]
-        .mean().round(1).reset_index()
-        .rename(columns={"launch_speed": "Avg EV (L3G)"})
-    )
-
 # ── Fetch pitcher stats ────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_pitcher_stats(season: int) -> pd.DataFrame:
@@ -714,163 +459,10 @@ def fetch_pitcher_stats(season: int) -> pd.DataFrame:
         hr_allowed = int(stat.get("homeRuns", 0) or 0)
         rows.append({
             "Pitcher":      player.get("fullName", "Unknown"),
-            "pitcher_id":   player.get("id"),
             "Pitcher hand": player.get("pitchHand", {}).get("code", "R"),
             "HR/9":         round(hr_allowed / ip * 9, 2) if ip > 0 else 0.0,
         })
     return pd.DataFrame(rows)
-
-# ── Pitcher last-10-starts game log (which gamePks were starts) ──────────────
-@st.cache_data(ttl=3600)
-def fetch_pitcher_starts(pitcher_id: int, season: int, n: int = 10) -> list:
-    """
-    Returns the pitcher's last n starts this season as a list of
-    {"game_pk": int, "date": "YYYY-MM-DD"} dicts, sorted oldest → newest.
-    Uses MLB Stats API gameLog so we can reliably tell starts apart from
-    relief appearances via the gamesStarted flag.
-    """
-    if not pitcher_id:
-        return []
-    url = (
-        f"https://statsapi.mlb.com/api/v1/people/{int(pitcher_id)}/stats"
-        f"?stats=gameLog&group=pitching&gameType=R&season={season}"
-    )
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        splits = r.json()["stats"][0]["splits"]
-    except Exception:
-        return []
-
-    starts = []
-    for s in splits:
-        stat = s.get("stat", {})
-        try:
-            gs = int(stat.get("gamesStarted", 0) or 0)
-        except (TypeError, ValueError):
-            gs = 0
-        if gs != 1:
-            continue
-        game_pk   = s.get("game", {}).get("gamePk")
-        game_date = s.get("date")
-        if game_pk and game_date:
-            starts.append({"game_pk": game_pk, "date": game_date})
-
-    starts.sort(key=lambda x: x["date"])
-    return starts[-n:]
-
-# ── Pull pitch-level Statcast for one pitcher over a date window ─────────────
-@st.cache_data(ttl=3600)
-def fetch_pitcher_pitch_log(pitcher_id: int, season: int, date_min: str, date_max: str) -> pd.DataFrame:
-    """
-    Pulls raw pitch-by-pitch Statcast rows for this pitcher between date_min
-    and date_max (both padded by the caller). The caller is responsible for
-    filtering down to the exact game_pks they care about, since a pitcher may
-    have other appearances inside the same window.
-    """
-    url = (
-        f"https://baseballsavant.mlb.com/statcast_search/csv"
-        f"?all=true&hfGT=R%7C&hfSea={season}%7C&player_type=pitcher"
-        f"&pitchers_lookup%5B%5D={int(pitcher_id)}"
-        f"&game_date_gt={date_min}&game_date_lt={date_max}"
-        f"&min_pitches=0&min_results=0&type=details&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        df = pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        return pd.DataFrame()
-    return df
-
-# ── Aggregate last-10-starts metrics for one pitcher ──────────────────────────
-@st.cache_data(ttl=3600)
-def compute_last10_pitcher_metrics(pitcher_id: int, season: int) -> dict:
-    """
-    Builds xwOBA, CSW%, SwStr%, Ball%, Barrel/BBE%, FB%, and HH% allowed,
-    aggregated over the pitcher's last 10 starts, from raw Statcast pitches.
-    """
-    starts = fetch_pitcher_starts(pitcher_id, season, n=10)
-    if not starts:
-        return {}
-
-    game_pks = {s["game_pk"] for s in starts}
-    dates    = sorted(s["date"] for s in starts)
-    date_min = (pd.to_datetime(dates[0])  - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    date_max = (pd.to_datetime(dates[-1]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-
-    df = fetch_pitcher_pitch_log(pitcher_id, season, date_min, date_max)
-    if df.empty or "game_pk" not in df.columns:
-        return {"Starts (L10)": len(starts), "Last start": dates[-1]}
-
-    df = df[df["game_pk"].isin(game_pks)].copy()
-    if df.empty:
-        return {"Starts (L10)": len(starts), "Last start": dates[-1]}
-
-    total_pitches = len(df)
-    desc = df["description"].astype(str) if "description" in df.columns else pd.Series(dtype=str)
-
-    csw_mask   = desc.isin(["called_strike", "swinging_strike", "swinging_strike_blocked"])
-    swstr_mask = desc.isin(["swinging_strike", "swinging_strike_blocked"])
-    ball_mask  = desc.isin(["ball", "blocked_ball", "pitchout"])
-
-    csw_pct   = round(csw_mask.mean()   * 100, 1) if total_pitches and not desc.empty else None
-    swstr_pct = round(swstr_mask.mean() * 100, 1) if total_pitches and not desc.empty else None
-    ball_pct  = round(ball_mask.mean()  * 100, 1) if total_pitches and not desc.empty else None
-
-    # Batted ball events (pitch result type "X" = ball put in play)
-    if "type" in df.columns:
-        bbe = df[df["type"] == "X"].copy()
-    elif "description" in df.columns:
-        bbe = df[desc == "hit_into_play"].copy()
-    else:
-        bbe = pd.DataFrame()
-
-    barrel_pct = hh_pct = fb_pct = None
-    if not bbe.empty:
-        if "launch_speed_angle" in bbe.columns:
-            barrels = pd.to_numeric(bbe["launch_speed_angle"], errors="coerce") == 6
-            barrel_pct = round(barrels.mean() * 100, 1)
-        if "launch_speed" in bbe.columns:
-            ls = pd.to_numeric(bbe["launch_speed"], errors="coerce")
-            valid_ls = ls.dropna()
-            if not valid_ls.empty:
-                hh_pct = round((valid_ls >= 95).mean() * 100, 1)
-        if "bb_type" in bbe.columns:
-            fb_pct = round((bbe["bb_type"] == "fly_ball").mean() * 100, 1)
-
-    # xwOBA: blend estimated_woba_using_speedangle (batted balls) with actual
-    # woba_value (K / BB / HBP, where there's no "expected" contact quality)
-    xwoba = None
-    if {"game_pk", "at_bat_number", "woba_value", "woba_denom"}.issubset(df.columns):
-        agg = {"woba_value": "max", "woba_denom": "max"}
-        if "estimated_woba_using_speedangle" in df.columns:
-            agg["estimated_woba_using_speedangle"] = "max"
-        pa = df.groupby(["game_pk", "at_bat_number"]).agg(agg).reset_index()
-        denom = pd.to_numeric(pa["woba_denom"], errors="coerce").fillna(0)
-        qualifying = pa[denom > 0].copy()
-        if not qualifying.empty:
-            act = pd.to_numeric(qualifying["woba_value"], errors="coerce")
-            if "estimated_woba_using_speedangle" in qualifying.columns:
-                est = pd.to_numeric(qualifying["estimated_woba_using_speedangle"], errors="coerce")
-                combined = est.where(est.notna(), act)
-            else:
-                combined = act
-            den = pd.to_numeric(qualifying["woba_denom"], errors="coerce").sum()
-            if den > 0:
-                xwoba = round(combined.sum() / den, 3)
-
-    return {
-        "Starts (L10)": len(starts),
-        "xwOBA":        xwoba,
-        "CSW%":         csw_pct,
-        "SwStr%":       swstr_pct,
-        "Ball%":        ball_pct,
-        "Barrel/BBE%":  barrel_pct,
-        "FB%":          fb_pct,
-        "HH%":          hh_pct,
-        "Last start":   dates[-1],
-    }
 
 # ── Fetch pitcher pitch mix by batter handedness ──────────────────────────────
 @st.cache_data(ttl=3600)
@@ -1120,7 +712,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Avg EV", "Barrel%", "HH%", "Ideal Attack Angle%", "Pull%"]
+STATCAST_COLS = ["Barrel%", "HH%"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -1161,9 +753,6 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             "HR":            b["HR"],
             "AB":            b["AB"],
             "SLG":           b["SLG"],
-            "Avg EV (L3G)":  b.get("Avg EV (L3G)", None),
-            "Avg LA (L3G)":  b.get("Avg LA", None),
-            "FB% (L3G)":     b.get("FB% (L3G)", None),
             "Matchup score": None,
             "_qual_pitches": ",".join(qual_pitches) if qual_pitches else "",
         }
@@ -1179,40 +768,25 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
 BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
-    "Avg EV (L3G)", "Avg LA (L3G)", "FB% (L3G)",
-    "Barrel%", "HH%", "Ideal Attack Angle%", "Pull%",
+    "Barrel%", "HH%",
+    "HH% vs pitch mix", "wOBA vs pitch mix",
+    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
-    "FB% (L3G)", "Ideal Attack Angle%", "Pull%",
     "SLG", "Matchup score",
 ]
 LOW_GOOD = []
 
 # ── Absolute threshold colour helpers ─────────────────────────────────────────
-def _la_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if 25 <= v <= 35:                       return "background-color:#1a9641;color:white"
-    elif 15 <= v < 25 or 35 < v <= 45:     return "background-color:#fdae61;color:#1a1a1a"
-    else:                                   return "background-color:#d7191c;color:white"
-
 def _barrel_color(val):
     try: v = float(val)
     except (TypeError, ValueError): return ""
     if v > 15:      return "background-color:#1a9641;color:white"
     elif v >= 10:   return "background-color:#a6d96a;color:#1a1a1a"
     elif v >= 6:    return "background-color:#fdae61;color:#1a1a1a"
-    else:           return "background-color:#d7191c;color:white"
-
-def _ev_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v >= 100:    return "background-color:#1a9641;color:white"
-    elif v >= 95:   return "background-color:#a6d96a;color:#1a1a1a"
-    elif v >= 90:   return "background-color:#fdae61;color:#1a1a1a"
     else:           return "background-color:#d7191c;color:white"
 
 def _hh_color(val):
@@ -1223,182 +797,32 @@ def _hh_color(val):
     elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
     else:           return "background-color:#d7191c;color:white"
 
-def _attack_angle_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v >= 60:     return "background-color:#1a9641;color:white"
-    elif v >= 50:   return "background-color:#a6d96a;color:#1a1a1a"
-    elif v >= 40:   return "background-color:#fdae61;color:#1a1a1a"
-    else:           return "background-color:#d7191c;color:white"
-
-def _pull_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v >= 45:     return "background-color:#1a9641;color:white"
-    elif v >= 38:   return "background-color:#a6d96a;color:#1a1a1a"
-    elif v >= 30:   return "background-color:#fdae61;color:#1a1a1a"
-    else:           return "background-color:#d7191c;color:white"
-
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
-        "Avg EV (L3G)":         "{:.1f}",
-        "Avg LA (L3G)":         "{:.1f}°",
-        "FB% (L3G)":            "{:.1f}%",
-        "Barrel%":              "{:.1f}%",
-        "HH%":                  "{:.1f}%",
-        "Ideal Attack Angle%":  "{:.1f}%",
-        "Pull%":                "{:.1f}%",
-        "SLG":                  "{:.3f}",
-        "Matchup score":        "{:.1f}",
+        "Barrel%":       "{:.1f}%",
+        "HH%":           "{:.1f}%",
+        "SLG":           "{:.3f}",
+        "Matchup score": "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
 
-    # Relative gradient cols (higher = greener)
     for col in HIGH_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn")
-    # Relative gradient cols (lower = greener)
     for col in LOW_GOOD:
         if col in cols and df[col].notna().any():
             styled = styled.background_gradient(subset=[col], cmap="RdYlGn_r")
 
-    # Absolute threshold cols
     abs_map = {
-        "Avg EV (L3G)":        _ev_color,
-        "Avg LA (L3G)":        _la_color,
-        "Barrel%":             _barrel_color,
-        "HH%":                 _hh_color,
-        "Ideal Attack Angle%": _attack_angle_color,
-        "Pull%":               _pull_color,
+        "Barrel%": _barrel_color,
+        "HH%":     _hh_color,
     }
     for col, fn in abs_map.items():
         if col in cols and df[col].notna().any():
             styled = styled.map(fn, subset=[col])
 
     return styled
-
-# ── Pitcher (last-10-starts) display + colour helpers ─────────────────────────
-PITCHER_DISPLAY_COLS = [
-    "Pitcher", "Team", "Hand", "Starts (L10)",
-    "xwOBA", "CSW%", "SwStr%", "Ball%",
-    "Barrel/BBE%", "FB%", "HH%", "Last start",
-]
-
-def _pitcher_xwoba_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v < 0.290:    return "background-color:#1a9641;color:white"
-    elif v < 0.310:  return "background-color:#a6d96a;color:#1a1a1a"
-    elif v < 0.330:  return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _csw_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v >= 32:      return "background-color:#1a9641;color:white"
-    elif v >= 29:    return "background-color:#a6d96a;color:#1a1a1a"
-    elif v >= 26:    return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _swstr_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v >= 13:      return "background-color:#1a9641;color:white"
-    elif v >= 11:    return "background-color:#a6d96a;color:#1a1a1a"
-    elif v >= 9:     return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _ball_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v <= 33:      return "background-color:#1a9641;color:white"
-    elif v <= 36:    return "background-color:#a6d96a;color:#1a1a1a"
-    elif v <= 39:    return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _barrel_allowed_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v < 6:        return "background-color:#1a9641;color:white"
-    elif v < 8:      return "background-color:#a6d96a;color:#1a1a1a"
-    elif v < 10:     return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _hh_allowed_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v < 33:       return "background-color:#1a9641;color:white"
-    elif v < 38:     return "background-color:#a6d96a;color:#1a1a1a"
-    elif v < 43:     return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def _fb_allowed_color(val):
-    try: v = float(val)
-    except (TypeError, ValueError): return ""
-    if v < 30:       return "background-color:#1a9641;color:white"
-    elif v < 36:     return "background-color:#a6d96a;color:#1a1a1a"
-    elif v < 42:     return "background-color:#fdae61;color:#1a1a1a"
-    else:            return "background-color:#d7191c;color:white"
-
-def style_pitcher_table(df: pd.DataFrame, cols: list):
-    fmt = {
-        "xwOBA":       "{:.3f}",
-        "CSW%":        "{:.1f}%",
-        "SwStr%":      "{:.1f}%",
-        "Ball%":       "{:.1f}%",
-        "Barrel/BBE%": "{:.1f}%",
-        "FB%":         "{:.1f}%",
-        "HH%":         "{:.1f}%",
-    }
-    fmt    = {k: v for k, v in fmt.items() if k in cols}
-    styled = df[cols].style.format(fmt, na_rep="—")
-
-    abs_map = {
-        "xwOBA":       _pitcher_xwoba_color,
-        "CSW%":        _csw_color,
-        "SwStr%":      _swstr_color,
-        "Ball%":       _ball_color,
-        "Barrel/BBE%": _barrel_allowed_color,
-        "FB%":         _fb_allowed_color,
-        "HH%":         _hh_allowed_color,
-    }
-    for col, fn in abs_map.items():
-        if col in cols and df[col].notna().any():
-            styled = styled.map(fn, subset=[col])
-
-    return styled
-
-def build_pitcher_last10_rows(g: dict, pitcher_df: pd.DataFrame,
-                               player_hands: pd.DataFrame, pitcher_id_map: dict,
-                               season: int) -> pd.DataFrame:
-    """One row per starting pitcher (away + home) for a single game."""
-    rows = []
-    for team_name, pname in [(g["away_team"], g["away_pitcher"]),
-                              (g["home_team"], g["home_pitcher"])]:
-        row = {"Pitcher": pname or "TBD", "Team": TEAM_ABBREV.get(team_name, team_name)}
-
-        if not pname or pname == "TBD":
-            row["Hand"] = "—"
-            rows.append(row)
-            continue
-
-        hand = None
-        pr_row = pitcher_df[pitcher_df["Pitcher"] == pname] if not pitcher_df.empty else pd.DataFrame()
-        if not pr_row.empty:
-            hand = pr_row.iloc[0].get("Pitcher hand")
-        if hand is None and not player_hands.empty:
-            ph_row = player_hands[player_hands["Player"] == pname]
-            if not ph_row.empty:
-                hand = ph_row.iloc[0].get("pitch_hand")
-        row["Hand"] = "LHP" if hand == "L" else "RHP"
-
-        pid = pitcher_id_map.get(pname)
-        if pid:
-            row.update(compute_last10_pitcher_metrics(int(pid), season))
-        rows.append(row)
-
-    return pd.DataFrame(rows)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -1424,9 +848,8 @@ with st.sidebar:
     st.caption("• K% vs pitch mix — 5% (lower = better)")
     st.markdown("---")
     st.markdown("**Data sources**")
-    st.caption("MLB Stats API — HR, schedule, pitchers, splits")
-    st.caption("Baseball Savant — EV, pitch mix, vs pitch type")
-    st.caption("Barrel%, HH%, Ideal Attack Angle%, Pull%, and SLG reflect the last 7 days (falls back to season stats if a player has no batted balls in that window)")
+    st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
+    st.caption("Baseball Savant — EV, HH%, Barrel%, pitch mix, vs pitch type")
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -1436,8 +859,6 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     sc_main           = fetch_savant_main(season)
     sc_barrels        = fetch_savant_barrels(season)
     sc_fb             = fetch_savant_fb(season)
-    sc_attack_angle   = fetch_savant_attack_angle(season)
-    sc_last7d         = fetch_last7d_batter_stats(date_str)
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
@@ -1488,22 +909,12 @@ if not player_hands.empty:
 else:
     hitting_df["bat_side"] = "R"
 
-# ── Pitcher name → MLBAM id lookup (for last-10-starts Statcast pulls) ────────
-pitcher_id_map = {}
-if "pitcher_id" in pitcher_df.columns:
-    pitcher_id_map.update(
-        dict(zip(pitcher_df["Pitcher"], pitcher_df["pitcher_id"]))
-    )
-if not player_hands.empty and "player_id" in player_hands.columns:
-    for _, r in player_hands.iterrows():
-        pitcher_id_map.setdefault(r["Player"], r["player_id"])
-
 if hitting_df.empty:
     st.warning("Could not load hitting stats. Try again in a moment.")
     st.stop()
 
 # ── Merge full-season Statcast ─────────────────────────────────────────────────
-for src in [sc_main, sc_barrels, sc_fb, sc_attack_angle]:
+for src in [sc_main, sc_barrels, sc_fb]:
     if src.empty:
         continue
     # Only merge columns not already in hitting_df to avoid duplicates
@@ -1511,27 +922,6 @@ for src in [sc_main, sc_barrels, sc_fb, sc_attack_angle]:
     if len(new_cols) <= 1:
         continue
     hitting_df = hitting_df.merge(src[new_cols], on="Player", how="left")
-
-# ── Overwrite Barrel%, HH%, Ideal Attack Angle%, and SLG with last-7-days
-# values (falling back to the season-long figure above when a player has no
-# batted-ball data in the window), and add Pull% — last 7 days only, there's
-# no full-season equivalent already on the page.
-L7D_OVERWRITE_COLS = ["Barrel%", "HH%", "Pull%", "Ideal Attack Angle%", "SLG"]
-if not sc_last7d.empty:
-    rename_map = {c: f"{c} (L7D)" for c in L7D_OVERWRITE_COLS if c in sc_last7d.columns}
-    l7d = sc_last7d.rename(columns=rename_map)
-    hitting_df = hitting_df.merge(
-        l7d[["Player"] + list(rename_map.values())], on="Player", how="left"
-    )
-    for orig, renamed in rename_map.items():
-        if orig in hitting_df.columns:
-            hitting_df[orig] = hitting_df[renamed].combine_first(hitting_df[orig])
-        else:
-            hitting_df[orig] = hitting_df[renamed]
-        hitting_df = hitting_df.drop(columns=[renamed])
-
-if "Pull%" not in hitting_df.columns:
-    hitting_df["Pull%"] = None
 
 if not splits_df.empty:
     new_cols = [c for c in splits_df.columns if c not in hitting_df.columns or c == "Player"]
@@ -1547,55 +937,15 @@ for col in STATCAST_COLS:
     if col not in hitting_df.columns:
         hitting_df[col] = None
 
-# ── Fetch and merge last 3 games EV/LA/FB% per team ──────────────────────────
-team_ids = set()
-for g in games:
-    if g["away_id"]: team_ids.add((g["away_id"], g["away_team"]))
-    if g["home_id"]: team_ids.add((g["home_id"], g["home_team"]))
 
-with st.spinner("Loading last 3 games fly ball and exit velocity data..."):
-    l3g_fb_frames = []
-    l3g_ev_frames = []
-    for tid, _ in team_ids:
-        df_fb = fetch_last3_fb(tid, season)
-        if not df_fb.empty:
-            l3g_fb_frames.append(df_fb)
-        df_ev = fetch_last3_ev_savant(tid, season)
-        if not df_ev.empty:
-            l3g_ev_frames.append(df_ev)
-
-# Merge FB% (L3G) — by Player name
-if l3g_fb_frames:
-    l3g_fb = (
-        pd.concat(l3g_fb_frames)
-        .drop_duplicates(subset=["Player"])
-        .reset_index(drop=True)
-    )
-    hitting_df = hitting_df.merge(l3g_fb[["Player", "FB% (L3G)"]], on="Player", how="left")
-else:
-    hitting_df["FB% (L3G)"] = None
-
-# Merge Avg EV (L3G) — by Player name from Savant
-if l3g_ev_frames:
-    l3g_ev = pd.concat(l3g_ev_frames).groupby("Player")["Avg EV (L3G)"].mean().round(1).reset_index()
-    hitting_df = hitting_df.merge(l3g_ev, on="Player", how="left")
-else:
-    hitting_df["Avg EV (L3G)"] = None
 
 
 
 # Status banner
 failed = []
 if sc_main.empty: failed.append("HH%")
-if sc_attack_angle.empty: failed.append("Ideal Attack Angle%")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
-
-if sc_last7d.empty:
-    st.info(
-        "ℹ️ Could not load last-7-days Statcast — Barrel%, HH%, Ideal Attack Angle%, "
-        "and SLG are showing full-season stats instead, and Pull% shows '—'."
-    )
 
 # ── Game selector ──────────────────────────────────────────────────────────────
 st.subheader("Filter by game")
@@ -1646,72 +996,48 @@ for g in selected_games:
     )
     st.caption(f"{g['time']} · {g['venue']} · {pf_emoji} {pf_label} (PF {pf:.2f})")
 
-    tab_matchups, tab_pitchers = st.tabs(["📊 Batter matchups", "🎯 Starting pitchers"])
+    for batting_team, border, opp_pitcher, key in [
+        (g["away_team"], "var(--color-border-info)",    g["home_pitcher"],
+         f"{g['away_team']}__{g['away_team']}@{g['home_team']}"),
+        (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
+         f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
+    ]:
+        # Determine batter hand for pitch mix display (opposite of pitcher hand)
+        batter_hand_display = "R" if batting_team == g["away_team"] else "R"
+        mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
 
-    with tab_matchups:
-        for batting_team, border, opp_pitcher, key in [
-            (g["away_team"], "var(--color-border-info)",    g["home_pitcher"],
-             f"{g['away_team']}__{g['away_team']}@{g['home_team']}"),
-            (g["home_team"], "var(--color-border-success)", g["away_pitcher"],
-             f"{g['home_team']}__{g['away_team']}@{g['home_team']}"),
-        ]:
-            # Determine batter hand for pitch mix display (opposite of pitcher hand)
-            batter_hand_display = "R" if batting_team == g["away_team"] else "R"
-            mix_str = build_pitch_mix_str(pitch_mix_by_hand, opp_pitcher, batter_hand_display)
+        # Get pitcher hand for display label
+        pr_row     = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher]
+        p_hand     = pr_row.iloc[0]["Pitcher hand"] if not pr_row.empty else "R"
+        hand_label = "LHP" if p_hand == "L" else "RHP"
 
-            # Get pitcher hand for display label
-            pr_row     = pitcher_df[pitcher_df["Pitcher"] == opp_pitcher]
-            p_hand     = pr_row.iloc[0]["Pitcher hand"] if not pr_row.empty else "R"
-            hand_label = "LHP" if p_hand == "L" else "RHP"
-
-            st.markdown(
-                f"<div style='background:var(--color-background-secondary);"
-                f"border-left:3px solid {border};"
-                f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
-                f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
-                f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
-                f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {hand_label} {opp_pitcher}</span>"
-                f"</div>"
-                f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
-                f"🎯 Pitch mix: {mix_str}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            team_df = (
-                full_df[full_df["_key"] == key]
-                .drop(columns=["_key", "_qual_pitches"], errors="ignore")
-                .sort_values("Matchup score", ascending=False)
-                .reset_index(drop=True)
-            )
-
-            if team_df.empty:
-                st.info(f"No {batting_team} batters match current filters.")
-            else:
-                valid = [c for c in BASE_DISPLAY_COLS if c in team_df.columns]
-                st.dataframe(style_table(team_df, valid), use_container_width=True, height=380, hide_index=True)
-
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    with tab_pitchers:
-        st.caption(
-            "Last 10 starts · pitch-level Statcast. xwOBA / CSW% / SwStr% / Ball% are "
-            "computed per pitch thrown; Barrel/BBE%, FB%, and HH% allowed are computed "
-            "per batted-ball event."
+        st.markdown(
+            f"<div style='background:var(--color-background-secondary);"
+            f"border-left:3px solid {border};"
+            f"padding:10px 14px;border-radius:var(--border-radius-md);margin:10px 0 4px'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>"
+            f"<span style='font-size:14px;font-weight:500'>{batting_team}</span>"
+            f"<span style='font-size:12px;color:var(--color-text-secondary)'>batting vs {hand_label} {opp_pitcher}</span>"
+            f"</div>"
+            f"<div style='font-size:11px;color:var(--color-text-tertiary);margin-top:4px'>"
+            f"🎯 Pitch mix: {mix_str}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
         )
-        with st.spinner("Loading last 10 starts for both pitchers..."):
-            pitcher_table = build_pitcher_last10_rows(
-                g, pitcher_df, player_hands, pitcher_id_map, season
-            )
-        for col in ["Starts (L10)", "xwOBA", "CSW%", "SwStr%", "Ball%",
-                    "Barrel/BBE%", "FB%", "HH%", "Last start"]:
-            if col not in pitcher_table.columns:
-                pitcher_table[col] = None
-        valid_p = [c for c in PITCHER_DISPLAY_COLS if c in pitcher_table.columns]
-        st.dataframe(
-            style_pitcher_table(pitcher_table, valid_p),
-            use_container_width=True, hide_index=True,
+        team_df = (
+            full_df[full_df["_key"] == key]
+            .drop(columns=["_key", "_qual_pitches"], errors="ignore")
+            .sort_values("Matchup score", ascending=False)
+            .reset_index(drop=True)
         )
 
+        if team_df.empty:
+            st.info(f"No {batting_team} batters match current filters.")
+        else:
+            valid = [c for c in BASE_DISPLAY_COLS if c in team_df.columns]
+            st.dataframe(style_table(team_df, valid), use_container_width=True, height=380, hide_index=True)
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 # ── Top picks chart ────────────────────────────────────────────────────────────
 st.markdown("---")
@@ -1744,31 +1070,28 @@ with col_a:
     st.plotly_chart(fig, use_container_width=True)
 
 with col_b:
-    st.markdown("**Avg EV vs HH% — last 3 games**")
+    st.markdown("**HH% vs Barrel% — last 7 days**")
     plot_df = chart_df.head(60)
-    hh_ok = "HH%"          in plot_df.columns and plot_df["HH%"].notna().any()
-    ev_ok = "Avg EV (L3G)" in plot_df.columns and plot_df["Avg EV (L3G)"].notna().any()
-    if hh_ok and ev_ok:
+    hh_ok  = "HH%"     in plot_df.columns and plot_df["HH%"].notna().any()
+    brl_ok = "Barrel%" in plot_df.columns and plot_df["Barrel%"].notna().any()
+    if hh_ok and brl_ok:
         fig2 = px.scatter(
-            plot_df, x="HH%", y="Avg EV (L3G)", text="Player",
+            plot_df, x="HH%", y="Barrel%", text="Player",
             color="Matchup score", color_continuous_scale="RdYlGn",
             range_color=[0, 100],
             size="HR",
-            hover_data=["Batting team", "Opp pitcher", "SLG", "FB% (L3G)"],
+            hover_data=["Batting team", "Opp pitcher", "SLG"],
         )
         fig2.update_traces(textposition="top center", textfont_size=9)
         fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=440)
         st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("EV data unavailable — chart will appear once last 3 games data loads.")
+        st.info("L7D data unavailable for chart.")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
     "Data: MLB Stats API + Baseball Savant Statcast · "
     "Park factors are multi-year estimates · "
-    "Probable pitchers from MLB schedule API · "
-    "Pitcher tab stats are computed from raw pitch-level Statcast data over each "
-    "starter's last 10 starts (xwOBA is approximated, not Savant's exact figure) · "
-    "Bet responsibly."
+    "Probable pitchers from MLB schedule API · Bet responsibly."
 )
