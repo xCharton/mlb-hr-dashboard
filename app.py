@@ -521,21 +521,6 @@ def fetch_pitch_mix_by_hand(season: int) -> pd.DataFrame:
 
     return pd.concat(frames).reset_index(drop=True) if frames else pd.DataFrame()
 
-def get_qualifying_pitches(pitch_mix_by_hand: pd.DataFrame, pitcher: str,
-                           batter_hand: str, min_pct: float = 18.0):
-    """
-    Returns list of pitch type codes the pitcher throws ≥ min_pct% vs this batter hand.
-    Falls back to overall top pitch if nothing qualifies.
-    """
-    if pitch_mix_by_hand.empty:
-        return []
-    sub = pitch_mix_by_hand[
-        (pitch_mix_by_hand["Pitcher"] == pitcher) &
-        (pitch_mix_by_hand["batter_hand"] == batter_hand) &
-        (pitch_mix_by_hand["usage_pct"] >= min_pct)
-    ].sort_values("usage_pct", ascending=False)
-    return sub["pitch_type"].tolist()
-
 def build_pitch_mix_str(pitch_mix_by_hand: pd.DataFrame, pitcher: str, batter_hand: str):
     """Build display string for game header showing pitches vs this batter hand."""
     if pitch_mix_by_hand.empty:
@@ -596,113 +581,98 @@ def fetch_batter_splits(season: int) -> pd.DataFrame:
     vr = df[df["split"] == "vs R"][["Player", "HR (vs R)", "SLG (vs R)"]].drop_duplicates("Player")
     return vl.merge(vr, on="Player", how="outer")
 
-# ── Fetch batter stats vs pitch type from Savant ──────────────────────────────
-@st.cache_data(ttl=3600)
-def fetch_pitch_type_splits(season: int) -> pd.DataFrame:
+# ── Savant: Ideal Attack Angle% and Pull% — last 5 days ───────────────────────
+@st.cache_data(ttl=1800)
+def fetch_last5d_batter_swing_stats(season: int) -> pd.DataFrame:
     """
-    Pulls batter Barrel%, HH%, SwStr%, and Pull Air% broken down by pitch type.
-    Savant pitch arsenal batter stats endpoint — one row per player per pitch type.
-    Returns wide df: Player, then cols like Barrel%(FF), HH%(FF), SwStr%(FF) etc.
+    Single bulk pitch-level pull from Statcast Search covering the last 5 days,
+    used to derive two rolling batter metrics:
+      - Ideal Attack Angle% (L5D): % of batted balls struck with a 5-20°
+        attack angle (bat-tracking data, per Savant's "ideal attack angle" def).
+      - Pull% (L5D): % of batted balls pulled, handedness-dependent
+        (hit_location 5/6/7 = pulled for RHB, 3/4/9 = pulled for LHB).
     """
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats"
-        f"?type=batter&pitchType=&year={season}&team=&min=10&csv=true"
-    )
+    end_date   = date.today()
+    start_date = end_date - pd.Timedelta(days=5)
+    url = "https://baseballsavant.mlb.com/statcast_search/csv"
+    params = {
+        "all":               "true",
+        "hfGT":              "R|",
+        "hfSea":             f"{season}|",
+        "player_type":       "batter",
+        "game_date_gt":      start_date.strftime("%Y-%m-%d"),
+        "game_date_lt":      end_date.strftime("%Y-%m-%d"),
+        "group_by":          "name",
+        "min_pitches":       0,
+        "min_results":       0,
+        "min_pas":           0,
+        "sort_col":          "pitches",
+        "player_event_sort": "api_p_release_speed",
+        "sort_order":        "desc",
+        "type":              "details",
+        "csv":               "true",
+    }
     try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
     except Exception:
         return pd.DataFrame()
 
-    if df.empty:
+    needed = {"player_name", "stand", "type", "hit_location", "attack_angle"}
+    if df.empty or not needed.issubset(df.columns):
         return pd.DataFrame()
 
-    name_col = next((c for c in df.columns if "last_name" in c.lower()), None)
-    if name_col:
-        df["Player"] = df[name_col].apply(parse_savant_name)
-    else:
+    df["Player"] = df["player_name"].apply(parse_savant_name)
+
+    # Only batted balls count toward either rate
+    bbe = df[df["type"] == "X"].copy()
+    if bbe.empty:
         return pd.DataFrame()
 
-    # Always use pitch_type (codes like FF, SI, SL) not pitch_name for pivot keys
-    # so they match the extract_top_pitch codes used in build_raw_rows
-    pitch_col = next((c for c in df.columns if c.lower() == "pitch_type"), None)
-    if not pitch_col:
-        pitch_col = next((c for c in df.columns if c.lower() == "pitch_name"), None)
-    if not pitch_col:
-        return pd.DataFrame()
+    bbe["attack_angle"] = pd.to_numeric(bbe["attack_angle"], errors="coerce")
+    bbe["hit_location"] = pd.to_numeric(bbe["hit_location"], errors="coerce")
 
-    # Confirmed columns from this endpoint:
-    # whiff_percent, hard_hit_percent, woba, est_woba (xwOBA), slg, ba, k_percent
-    stat_map = {
-        "hard_hit_percent": "HH%",
-        "woba":             "wOBA",
-        "est_woba":         "xwOBA",
-        "k_percent":        "K%",
-        "slg":              "_slg",
-        "ba":               "_ba",
-    }
-    for col in stat_map:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Ideal Attack Angle% — only over batted balls with a tracked attack angle
+    angle_df = bbe.dropna(subset=["attack_angle"])
+    ideal = (
+        angle_df["attack_angle"].between(5, 20)
+        .groupby(angle_df["Player"]).mean()
+        .mul(100).round(1)
+        .rename("Ideal Attack Angle% (L5D)")
+    )
 
-    # hard_hit_percent and k_percent: convert to % only if stored as decimals
-    # Check median — if median < 1.0 they're decimals, if > 1.0 already percentages
-    for pct_col in ["hard_hit_percent", "k_percent"]:
-        if pct_col in df.columns:
-            median = df[pct_col].dropna().median()
-            if median < 1.0:
-                df[pct_col] = (df[pct_col] * 100).round(1)
-            else:
-                df[pct_col] = df[pct_col].round(1)
+    # Pull% — handedness-dependent hit_location, only over batted balls with a location
+    pull_df = bbe.dropna(subset=["hit_location"])
+    pulled = (
+        (pull_df["stand"].eq("R") & pull_df["hit_location"].isin([5, 6, 7])) |
+        (pull_df["stand"].eq("L") & pull_df["hit_location"].isin([3, 4, 9]))
+    )
+    pull_rate = (
+        pulled.groupby(pull_df["Player"]).mean()
+        .mul(100).round(1)
+        .rename("Pull% (L5D)")
+    )
 
-    # Pivot: one row per player, cols named Stat(PitchType)
-    rows = {}
-    for _, row in df.iterrows():
-        player = row["Player"]
-        pitch  = str(row[pitch_col]).strip()
-        if player not in rows:
-            rows[player] = {"Player": player}
-        for src_col, display_name in stat_map.items():
-            if src_col in df.columns:
-                rows[player][f"{display_name} ({pitch})"] = row[src_col]
-        # Calculate ISO = SLG - BA per pitch type
-        slg_val = row.get("slg", None)
-        ba_val  = row.get("ba",  None)
-        if slg_val is not None and ba_val is not None:
-            try:
-                iso = round(float(slg_val) - float(ba_val), 3)
-                rows[player][f"ISO ({pitch})"] = iso
-            except (ValueError, TypeError):
-                rows[player][f"ISO ({pitch})"] = None
-
-    result = pd.DataFrame(list(rows.values()))
-    # Drop internal _slg and _ba columns
-    drop_cols = [c for c in result.columns if c.startswith("_slg (") or c.startswith("_ba (")]
-    return result.drop(columns=drop_cols, errors="ignore")
+    return pd.concat([ideal, pull_rate], axis=1).reset_index()
 
 # ── 0-100 matchup score ────────────────────────────────────────────────────────
 SCORE_WEIGHTS = {
-    "HH% vs pitch mix":   0.35,
-    "xwOBA vs pitch mix": 0.30,
-    "ISO vs pitch mix":   0.20,
-    "wOBA vs pitch mix":  0.10,
-    "K% vs pitch mix":    0.05,
+    "Barrel%":                   0.30,
+    "HH%":                       0.25,
+    "Ideal Attack Angle% (L5D)": 0.25,
+    "Pull% (L5D)":               0.20,
 }
 
 def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     df    = df.copy()
     score = pd.Series(0.0, index=df.index)
-    # Cols where lower = better (invert before scaling)
-    invert = {"K% vs pitch mix"}
     for col, weight in SCORE_WEIGHTS.items():
         if col not in df.columns or df[col].isna().all():
             continue
         vals   = df[col].fillna(df[col].median())
         lo, hi = vals.min(), vals.max()
         scaled = (vals - lo) / (hi - lo) if hi > lo else pd.Series(0.5, index=df.index)
-        if col in invert:
-            scaled = 1 - scaled   # flip so low K% = high score
         score += scaled * weight
     s_min, s_max = score.min(), score.max()
     df["Matchup score"] = (
@@ -712,7 +682,7 @@ def compute_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ── Build raw rows ─────────────────────────────────────────────────────────────
-STATCAST_COLS = ["Barrel%", "HH%"]
+STATCAST_COLS = ["Barrel%", "HH%", "Ideal Attack Angle% (L5D)", "Pull% (L5D)"]
 def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
                    hitting_df, pitcher_df, min_ab, min_hr):
     batters = hitting_df[
@@ -733,19 +703,6 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
         batter_hand = b.get("bat_side", "R")
         hand_label  = "LHB" if batter_hand == "L" else "RHB"
 
-        # Get all pitches thrown ≥18% vs this batter hand
-        qual_pitches = get_qualifying_pitches(pitch_mix_by_hand, opp_pitcher, batter_hand)
-
-        # Average batter stats across all qualifying pitches
-        def avg_stat_vs_pitches(stat_name):
-            vals = [b.get(f"{stat_name} ({p})", None) for p in qual_pitches]
-            vals = [v for v in vals if v is not None and not pd.isna(v)]
-            if not vals:
-                return None
-            avg = sum(vals) / len(vals)
-            # Percentage stats round to 1dp, rate stats to 3dp
-            pct_stats = {"HH%", "K%"}
-            return round(avg, 1) if stat_name in pct_stats else round(avg, 3)
         row = {
             "Player":        f"{b['Player']} ({hand_label})",
             "Batting team":  TEAM_ABBREV.get(batting_team, batting_team),
@@ -754,13 +711,9 @@ def build_raw_rows(batting_id, batting_team, opp_pitcher, home_team,
             "AB":            b["AB"],
             "SLG":           b["SLG"],
             "Matchup score": None,
-            "_qual_pitches": ",".join(qual_pitches) if qual_pitches else "",
         }
         for col in STATCAST_COLS:
             row[col] = b.get(col, None)
-        for stat in ["HH%", "wOBA", "xwOBA", "K%", "ISO"]:
-            val = avg_stat_vs_pitches(stat)
-            row[f"{stat} vs pitch mix"] = val
         rows.append(row)
     return rows
 
@@ -769,14 +722,14 @@ BASE_DISPLAY_COLS = [
     "Player", "Batting team", "Opp pitcher",
     "HR", "AB",
     "Barrel%", "HH%",
-    "HH% vs pitch mix", "wOBA vs pitch mix",
-    "xwOBA vs pitch mix", "ISO vs pitch mix", "K% vs pitch mix",
+    "Ideal Attack Angle% (L5D)", "Pull% (L5D)",
     "SLG",
     "Matchup score",
 ]
 
 HIGH_GOOD = [
     "SLG", "Matchup score",
+    "Ideal Attack Angle% (L5D)", "Pull% (L5D)",
 ]
 LOW_GOOD = []
 
@@ -799,10 +752,12 @@ def _hh_color(val):
 
 def style_table(df: pd.DataFrame, cols: list):
     fmt = {
-        "Barrel%":       "{:.1f}%",
-        "HH%":           "{:.1f}%",
-        "SLG":           "{:.3f}",
-        "Matchup score": "{:.1f}",
+        "Barrel%":                   "{:.1f}%",
+        "HH%":                       "{:.1f}%",
+        "Ideal Attack Angle% (L5D)": "{:.1f}%",
+        "Pull% (L5D)":               "{:.1f}%",
+        "SLG":                       "{:.3f}",
+        "Matchup score":             "{:.1f}",
     }
     fmt    = {k: v for k, v in fmt.items() if k in cols}
     styled = df[cols].style.format(fmt, na_rep="—")
@@ -841,15 +796,14 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Matchup score (0–100)**")
     st.caption("100 = best HR prop candidate today.")
-    st.caption("• HH% vs pitch mix — 35%")
-    st.caption("• xwOBA vs pitch mix — 30%")
-    st.caption("• ISO vs pitch mix — 20%")
-    st.caption("• wOBA vs pitch mix — 10%")
-    st.caption("• K% vs pitch mix — 5% (lower = better)")
+    st.caption("• Barrel% — 30%")
+    st.caption("• HH% — 25%")
+    st.caption("• Ideal Attack Angle% (L5D) — 25%")
+    st.caption("• Pull% (L5D) — 20%")
     st.markdown("---")
     st.markdown("**Data sources**")
     st.caption("MLB Stats API — HR, SLG, schedule, pitchers, splits")
-    st.caption("Baseball Savant — EV, HH%, Barrel%, pitch mix, vs pitch type")
+    st.caption("Baseball Savant — EV, HH%, Barrel%, pitch mix, L5D attack angle & pull%")
 
 # ── Load base data ─────────────────────────────────────────────────────────────
 date_str = selected_date.strftime("%Y-%m-%d")
@@ -862,7 +816,7 @@ with st.spinner("Loading schedule, Statcast, and pitcher data..."):
     pitcher_df        = fetch_pitcher_stats(season)
     splits_df         = fetch_batter_splits(season)
     pitch_mix_by_hand = fetch_pitch_mix_by_hand(season)
-    pitch_type_splits = fetch_pitch_type_splits(season)
+    last5d_swing_df   = fetch_last5d_batter_swing_stats(season)
     games_played      = fetch_games_played(season)
     player_hands      = fetch_player_hands(season)
 
@@ -928,10 +882,10 @@ if not splits_df.empty:
     if len(new_cols) > 1:
         hitting_df = hitting_df.merge(splits_df[new_cols], on="Player", how="left")
 
-if not pitch_type_splits.empty:
-    new_cols = [c for c in pitch_type_splits.columns if c not in hitting_df.columns or c == "Player"]
+if not last5d_swing_df.empty:
+    new_cols = [c for c in last5d_swing_df.columns if c not in hitting_df.columns or c == "Player"]
     if len(new_cols) > 1:
-        hitting_df = hitting_df.merge(pitch_type_splits[new_cols], on="Player", how="left")
+        hitting_df = hitting_df.merge(last5d_swing_df[new_cols], on="Player", how="left")
 
 for col in STATCAST_COLS:
     if col not in hitting_df.columns:
@@ -944,6 +898,7 @@ for col in STATCAST_COLS:
 # Status banner
 failed = []
 if sc_main.empty: failed.append("HH%")
+if last5d_swing_df.empty: failed.append("Ideal Attack Angle%/Pull% (L5D)")
 if failed:
     st.warning(f"⚠️ Could not load from Savant: {', '.join(failed)} — those columns show '—'.")
 
@@ -1026,7 +981,7 @@ for g in selected_games:
         )
         team_df = (
             full_df[full_df["_key"] == key]
-            .drop(columns=["_key", "_qual_pitches"], errors="ignore")
+            .drop(columns=["_key"], errors="ignore")
             .sort_values("Matchup score", ascending=False)
             .reset_index(drop=True)
         )
@@ -1044,7 +999,7 @@ st.markdown("---")
 st.subheader("Top picks across today's slate")
 
 chart_df = (
-    full_df.drop(columns=["_key", "_qual_pitches"], errors="ignore")
+    full_df.drop(columns=["_key"], errors="ignore")
     .sort_values("Matchup score", ascending=False)
     .reset_index(drop=True)
 )
